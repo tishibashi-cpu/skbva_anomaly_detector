@@ -16,6 +16,27 @@ PV 名の側室部（D01〜D12）で振り分け、
 """
 
 import csv
+import os
+
+PV_INFO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pv_info")
+
+
+def csv_path(ring):
+    """そのリングの CCG PV CSV のパス（pv_info/{ring}_CCG_PV.csv）。"""
+    return os.path.join(PV_INFO_DIR, "%s_CCG_PV.csv" % ring)
+
+
+def load_flat(csv_path):
+    """CSV を読み、CCG PV 名のフラットなリストを返す（側室別にしない）。
+    取得（kblogrd）用。1 列目（PV 名）だけを使う。"""
+    pvs = []
+    with open(csv_path, encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        for row in reader:
+            if row and row[0].strip():
+                pvs.append(row[0].strip())
+    return pvs
 
 
 def load_side_rooms(csv_path):

@@ -583,7 +583,7 @@ function renderIonPumps(s) {
               '</div>' +
               '<div class="ipbar"><span style="width:' + (frac * 100).toFixed(0) + '%"></span></div>' +
               '<div class="ipval">' + fmtCur(sec.max_latest) + '</div>' +
-              '<div class="ipn">' + sec.n_active + '/' + sec.n + ' 本</div>' +
+              '<div class="ipn">' + sec.n_active + '/' + sec.n + ' 台</div>' +
               '</div>';
     });
     html += '</div></div>';
@@ -593,7 +593,7 @@ function renderIonPumps(s) {
       if (sec) {
         html += '<div class="ippvs"><div class="ippvs-h">' + ring + ' ' + sec.section +
                 '（' + (sec.supply === "Agilent_4U" ? "Agilent 4U" : "KEK") + '／' +
-                sec.n + ' 本）</div>';
+                sec.n + ' 台）</div>';
         sec.pvs.forEach(p => {
           html += '<div class="ippv"><span class="ippv-name">' + p.pv + '</span>' +
                   sparkIP(p.trend, "#4a90d9", 120, 26) +

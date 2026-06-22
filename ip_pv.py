@@ -49,6 +49,45 @@ def supply_of(pv):
     return SUPPLY_4U if "_4U_" in pv else SUPPLY_KEK
 
 
+# イオンポンプ PV → 同一地点の CCG PV を導くための正規表現。
+#   KEK     : VALIP:D01_IP_L08:CUR        → VALCCG:D01_L08:PRES
+#   Agilent : VALIP:D05_4U_L01_A01C1:CUR  → VALCCG:D05_L01:PRES
+#   末尾英字（L09A, L16X 等）は保持する。
+_PAIR_RE = re.compile(r"^VA([LH])IP:(D\d+)_(?:IP|4U)_([LH]\d+[A-Z]?)(?:_A\d+C\d+)?:CUR$")
+
+
+def paired_ccg(ip_pv):
+    """イオンポンプ電流 PV から、同一地点の CCG 圧力 PV 名を導く。
+    変換できなければ None。例: 'VALIP:D01_IP_L08:CUR' → 'VALCCG:D01_L08:PRES'。
+    （対応する CCG が実在するかは別途 CCG リストと突き合わせること。）"""
+    m = _PAIR_RE.match(ip_pv)
+    if not m:
+        return None
+    return "VA%sCCG:%s_%s:PRES" % (m.group(1), m.group(2), m.group(3))
+
+
+def build_pairs(ip_pvs, ccg_pvs):
+    """イオンポンプ PV 群と CCG PV 群（実在するもの）を突き合わせ、
+    同一地点ペアを作る。
+
+    返り値: {"paired": [(ip_pv, ccg_pv), ...],   # 両方そろう地点
+             "ip_only": [ip_pv, ...],            # イオンポンプのみの地点
+             "ccg_only": [ccg_pv, ...]}          # CCG のみの地点
+    """
+    ccg_set = set(ccg_pvs)
+    paired, ip_only = [], []
+    matched_ccg = set()
+    for ip in ip_pvs:
+        c = paired_ccg(ip)
+        if c and c in ccg_set:
+            paired.append((ip, c))
+            matched_ccg.add(c)
+        else:
+            ip_only.append(ip)
+    ccg_only = [c for c in ccg_pvs if c not in matched_ccg]
+    return {"paired": paired, "ip_only": ip_only, "ccg_only": ccg_only}
+
+
 def load(path):
     """IP PV の CSV を読み、[{pv, ring, section, supply}, ...] を返す。"""
     recs = []

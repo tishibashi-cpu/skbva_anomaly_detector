@@ -1,5 +1,5 @@
 {
-  "updated": "2026-06-22 05:59:04",
+  "updated": "2026-06-22 09:45:43",
   "classifier": "FNN",
   "rings": {
     "LER": {
@@ -1468,65 +1468,5 @@
   },
   "recent_window_days": 3,
   "last_anomaly": "LER 2024-07-01 08:54:10（VALCCG:D03_L20:PRES） / HER 2024-07-01 08:54:09（VAHCCG:D08_H05:PRES）",
-  "_note": "原因=純numpy再現／トレンド=フィル要約／異常は検知時刻から3日以内に限定",
-  "ion_pumps": {
-    "device_type": "IonPump",
-    "updated": "t",
-    "interval_sec": 60,
-    "rings": {
-      "LER": {
-        "t": [
-          "06/10/2026 00:00:00",
-          "06/10/2026 00:01:00",
-          "06/10/2026 00:02:00",
-          "06/10/2026 00:03:00",
-          "06/10/2026 00:04:00"
-        ],
-        "sections": [
-          {
-            "section": "D01",
-            "n": 1,
-            "pvs": [
-              {
-                "pv": "VALIP:D01_IP_L01:CUR",
-                "supply": "KEK",
-                "latest": 1e-07,
-                "trend": [
-                  1e-07,
-                  1e-07,
-                  1e-07,
-                  1e-07,
-                  1e-07
-                ]
-              }
-            ],
-            "max_latest": 1e-07,
-            "n_active": 1,
-            "supply": "KEK"
-          },
-          {
-            "section": "D05",
-            "n": 1,
-            "pvs": [
-              {
-                "pv": "VALIP:D05_4U_L01_A01C1:CUR",
-                "supply": "Agilent_4U",
-                "latest": 2e-07,
-                "trend": [
-                  2e-07,
-                  2e-07,
-                  2e-07,
-                  2e-07,
-                  2e-07
-                ]
-              }
-            ],
-            "max_latest": 2e-07,
-            "n_active": 1,
-            "supply": "Agilent_4U"
-          }
-        ]
-      }
-    }
-  }
+  "_note": "原因=純numpy再現／トレンド=フィル要約／異常は検知時刻から3日以内に限定"
 }
