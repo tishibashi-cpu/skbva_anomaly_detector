@@ -110,7 +110,7 @@ CONFIG = {
     "Class_Method":     "Keras",    # 判定器: "Keras"（学習済み.h5）or "SDM"（自前重み）
     "Last_Refd":        2.0,        # 基準データ最終日 = 2 日前
     "Ref_Pd":           1.0,        # 基準期間 = 1 日
-    "File_Save_Para":   "Save",     # 結果を蓄積ファイルに保存する
+    "File_Save_Para":   1,          # 結果を蓄積ファイルに保存（レガシーは `File_Save_Para == 1` で判定。文字列だと保存されない）
     "Plot_Para":        0,          # 0 = プロットしない（ヘッドレス）
     "Run_Mode":         "Auto",     # 自動モード
     "Auto_Mode":        "Abt Trg",  # "Abt Trg"=アボートトリガ / "Cns Intr"=一定間隔
@@ -119,6 +119,15 @@ CONFIG = {
     "Hadv":             4.0,        # 一定間隔の時間 [h]
     "Check_Record_Name": "none",    # 自動検知では個別指定なし
 }
+
+# 定期チェック/--once で渡す「現在時刻」を何分過去にずらすか。
+# レガシーは調査期間の終端を Abort_Timing + minit_advance(≈2分) で決めるため、
+# 「今」を渡すと終端が現在時刻に張り付き、側室(D01〜D12)を順番に取得する間に
+# 時刻が進んで側室ごとに時刻点数(行数)がずれ、Get_Fit_CHK_Strg の連結(axis=1)で
+# 落ちる（特に長時間連続フィル時）。終端を数分過去に固定すれば全側室が完成済みの
+# 同一データを取得し行数が揃う。データ鮮度を数分犠牲にするだけで監視には影響しない。
+# アボートで走る本来の検知（make_cb が実アボート時刻を渡す経路）には適用しない。
+CHK_LAG_MIN = 10
 
 # 各リングの側室リスト（.sh 名と一致。112p の self.{LER,HER}_CCG_List 相当）
 CCG_LIST = {
@@ -242,6 +251,17 @@ def rebuild_json():
 # v0.1 は「間隔ポーリング」。EPICS アボートトリガ版（112p の LERtriggerEvent 相当、
 # epics.camonitor でアボート信号を待つ）は次段階で追加する。
 
+def _check_now(lag_min=CHK_LAG_MIN):
+    """定期/--once チェック用の『現在時刻』文字列を返す。
+
+    レガシーは調査期間の終端を (渡した時刻 + minit_advance) で決めるため、
+    lag_min 分だけ過去にずらして終端を過去に固定する。これで全側室が完成済みの
+    同一データを取得し、行数(時刻点数)が揃って Get_Fit_CHK_Strg の連結が成立する。
+    """
+    t = datetime.datetime.now() - datetime.timedelta(minutes=lag_min)
+    return t.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _run_ring(ring, now):
     """1リング分を実行し、所要時間を表示して JSON を更新する。"""
     t0 = time.time()
@@ -249,7 +269,13 @@ def _run_ring(ring, now):
     try:
         run_check(ring, now)
     except Exception as ex:
+        # 完全なトレースバックを出す（chr() 例外などの発生箇所を特定するため）
+        import traceback
         print("[%s] run_check 例外: %s" % (ring, ex), flush=True)
+        print("---- トレースバック（ここから）----", flush=True)
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        print("---- トレースバック（ここまで）----", flush=True)
     rebuild_json()  # このリングまでの結果で dashboard_state.json を更新
     print("[%s] 完了（%.0f 秒）" % (ring, time.time() - t0), flush=True)
 
@@ -314,7 +340,9 @@ def watch_aborts(delay_min=3, debounce_min=30, interval_h=4):
             for ring in ABORT_PV:
                 if (now - st[ring]["last_run"]).total_seconds() >= interval_h * 3600:
                     st[ring]["last_run"] = now
-                    threading.Thread(target=do_check, args=(ring, now),
+                    # 終端を過去に固定して側室間の行数ずれを防ぐ（アボート経路は対象外）
+                    when = now - datetime.timedelta(minutes=CHK_LAG_MIN)
+                    threading.Thread(target=do_check, args=(ring, when),
                                      daemon=True).start()
     except KeyboardInterrupt:
         print("\n監視を停止しました")
@@ -323,7 +351,7 @@ def watch_aborts(delay_min=3, debounce_min=30, interval_h=4):
 def loop_interval(interval_sec=4 * 3600):
     print("detector_headless 起動（間隔 %d 秒ごとにチェック）" % interval_sec)
     while True:
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = _check_now()
         for ring in ("LER", "HER"):
             _run_ring(ring, now)   # リングごとに JSON も更新
         time.sleep(interval_sec)
@@ -346,7 +374,7 @@ if __name__ == "__main__":
     #   --watch  アボートPVを監視し、アボート時＋定期に検知（常駐・実機向け推奨）
     #   引数なし  単純な定期ループ（loop_interval）
     if "--once" in sys.argv:
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = _check_now()
         t_all = time.time()
         for ring in ("LER", "HER"):
             _run_ring(ring, now)   # リングごとに JSON 更新（片方終わればすぐ表示に反映）
