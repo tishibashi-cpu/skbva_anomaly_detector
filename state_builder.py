@@ -87,12 +87,16 @@ def build_series(record, abn_rows, nrm_rows, pres_col=COL_MAXPRE):
     """
     need = max(pres_col, COL_BEAM, COL_RECORD)
     by_fill = {}
+    abn_fills = set()
     for r in abn_rows + nrm_rows:
         if len(r) <= need or r[COL_RECORD] != record:
             continue
         fill = r[COL_FILL]
         # 同一フィルが両方にある場合は後勝ち（実際はどちらか一方）
         by_fill[fill] = r
+    for r in abn_rows:                       # このフィルで異常と判定されたか
+        if len(r) > need and r[COL_RECORD] == record:
+            abn_fills.add(r[COL_FILL])
 
     pts = []
     for fill, r in by_fill.items():
@@ -102,7 +106,7 @@ def build_series(record, abn_rows, nrm_rows, pres_col=COL_MAXPRE):
             beam = float(r[COL_BEAM])
         except Exception:
             continue
-        pts.append((t, pres, beam))
+        pts.append((t, pres, beam, 1 if fill in abn_fills else 0))
 
     pts.sort(key=lambda x: x[0])
     pts = pts[-NTREND:]
@@ -110,6 +114,7 @@ def build_series(record, abn_rows, nrm_rows, pres_col=COL_MAXPRE):
         "t": list(range(len(pts))),
         "pressure": [p[1] for p in pts],
         "beam": [p[2] for p in pts],
+        "abnormal": [p[3] for p in pts],         # フィルごと 1=異常 / 0=正常
         "t_abort": [p[0].strftime("%Y-%m-%d %H:%M:%S") for p in pts],
     }
 
@@ -344,7 +349,74 @@ def build_state():
             state["ion_pumps"] = ip_block
     except Exception:
         pass
+
+    # イオンポンプ異常検知（ip_judge）の結果を専用セクション用に取り込む。
+    # ip_judge_state.json（judge --out-json の出力。1リング結果 dict か、その list）を読む。
+    ip_anoms, ip_sections = _load_ip_judge()
+    if ip_anoms is not None:
+        state["ion_pump_anomalies"] = ip_anoms
+        state["ip_sections"] = ip_sections
     return state
+
+
+IP_JUDGE_FILE = os.path.join(_HERE, "ip_judge_state.json")
+IP_HISTORY_FILE = os.path.join(_HERE, "ip_judge_history.json")  # PVごとのカウント推移（カードのプロット用）
+_IP_SEV = {3: "danger", 2: "warning", 1: "watch"}
+_IP_KRANK = {"acute": 0, "unknown": 1, "chronic": 2, None: 3}
+# 表示ゲート: sev3 のみ、かつ sev3 が IP_MIN_COUNT サイクル以上続いたものだけカードに出す
+# （CCG 同様、単発の判定で大量に出さない）。0 にすると全部出る。
+IP_MIN_SEV = 3
+IP_MIN_COUNT = 2
+
+
+def _load_ip_judge():
+    """ip_judge_state.json を読み、ダッシュボード用の (異常カードリスト, セクション) を返す。
+    ファイルが無ければ (None, None)。"""
+    if not os.path.isfile(IP_JUDGE_FILE):
+        return None, None
+    try:
+        with open(IP_JUDGE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None, None
+    results = data if isinstance(data, list) else [data]
+    try:
+        hist = json.load(open(IP_HISTORY_FILE, encoding="utf-8")) \
+               if os.path.isfile(IP_HISTORY_FILE) else {}
+    except Exception:
+        hist = {}
+    cards = []
+    sections = {ring: {"D%02d" % i: None for i in range(1, 13)} for ring in ("LER", "HER")}
+    for res in results:
+        ring = res.get("ring")
+        for p in res.get("pumps", []):
+            sev = p.get("severity", 0)
+            cnt = p.get("count", 0)
+            # 表示ゲート: sev3 以上 かつ 累積カウントが閾値以上のものだけ出す
+            if sev < IP_MIN_SEV or cnt < IP_MIN_COUNT:
+                continue
+            sec = p.get("section") or "?"
+            dev = p.get("deviation_dex")
+            seq = (hist.get(ring, {}) or {}).get(p["pv"]) or [cnt]
+            cards.append({
+                "id": "ip-%s" % p["pv"].replace(":", "-").lower(),
+                "pv": p["pv"], "ring": ring, "section": sec,
+                "supply": p.get("supply"),
+                "severity": _IP_SEV.get(sev, "watch"), "severity_n": sev,
+                "kind": p.get("kind"), "deviation_dex": dev,
+                "count": cnt, "series_count": seq,
+                "reason": p.get("reason", ""),
+            })
+            if ring in sections and sec in sections[ring]:
+                prev = sections[ring][sec]
+                rank = {"danger": 2, "warning": 1, "watch": 0}
+                cur = _IP_SEV.get(sev, "watch")
+                if prev is None or rank[cur] > rank.get(prev, -1):
+                    sections[ring][sec] = cur
+    # 並び: acute 優先 → severity 降順 → 逸脱量降順 → PV
+    cards.sort(key=lambda c: (_IP_KRANK.get(c["kind"], 3), -c["severity_n"],
+                              -(c["deviation_dex"] or -99), c["pv"]))
+    return cards, sections
 
 
 def main():

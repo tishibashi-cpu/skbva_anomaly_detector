@@ -40,10 +40,18 @@ try:
 except Exception:
     beamcurrent = None
 
+# 詳細ビュー用の生データ取得（legacy 準拠の窓で圧力/ビームを引き直す）。
+# numpy / kblogrd が無くてもダッシュボード自体は起動できるよう任意依存にする。
+try:
+    import record_raw
+except Exception:
+    record_raw = None
+
 PORT = 18050
 # dashboard_state.json はこのスクリプトと同じ場所（トップ）に置かれる。
 # CWD に依存しないよう __file__ 基準で解決する。
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_state.json")
+LABEL_QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "label_queue.jsonl")
 
 # ----------------------------------------------------------------------------
 # ダミーデータ生成（実運用 JSON と同じスキーマ）
@@ -85,7 +93,8 @@ def make_dummy_state():
             "ring": "HER", "section": "D01", "place": "大穂",
             "period": "Storage", "count": 8, "max_count": 8,
             "cause": "異常加熱 or 放電", "severity": "danger",
-            "series": {"t": t1, "pressure": p1, "beam": b1},
+            "series": {"t": t1, "pressure": p1, "beam": b1,
+                       "abnormal": [1 if i >= len(t1)-8 else 0 for i in range(len(t1))]},
         },
         {
             "id": "ler-d04-l07",
@@ -93,7 +102,8 @@ def make_dummy_state():
             "ring": "LER", "section": "D04", "place": "富士",
             "period": "Tail", "count": 6, "max_count": 6,
             "cause": "圧力バースト or リーク", "severity": "danger",
-            "series": {"t": t2, "pressure": p2, "beam": b2},
+            "series": {"t": t2, "pressure": p2, "beam": b2,
+                       "abnormal": [1 if i >= len(t2)-6 else 0 for i in range(len(t2))]},
         },
         {
             "id": "ler-d10-l09",
@@ -101,7 +111,8 @@ def make_dummy_state():
             "ring": "LER", "section": "D10", "place": "日光 (Wiggler)",
             "period": "Storage", "count": 4, "max_count": 4,
             "cause": "軌道異常 or リーク", "severity": "warning",
-            "series": {"t": t3, "pressure": p3, "beam": b3},
+            "series": {"t": t3, "pressure": p3, "beam": b3,
+                       "abnormal": [1 if i >= len(t3)-4 else 0 for i in range(len(t3))]},
         },
     ]
 
@@ -111,6 +122,30 @@ def make_dummy_state():
             sections[ring]["D%02d" % i] = None
     for a in anomalies:
         sections[a["ring"]][a["section"]] = a["severity"]
+
+    ip_anoms = [
+        {"id": "ip-demo-1", "pv": "VALIP:D12_IP_L23:CUR", "ring": "LER", "section": "D12",
+         "supply": "KEK", "severity": "danger", "severity_n": 3, "count": 6,
+         "series_count": [0, 1, 2, 3, 2, 3, 4, 5, 6],
+         "kind": "acute", "deviation_dex": 2.1, "reason": "feedthrough_discharge_suspect"},
+        {"id": "ip-demo-2", "pv": "VALIP:D01_IP_H14:CUR", "ring": "HER", "section": "D01",
+         "supply": "KEK", "severity": "danger", "severity_n": 3, "count": 4,
+         "series_count": [0, 0, 1, 2, 3, 4, 3, 4],
+         "kind": "acute", "deviation_dex": 1.3, "reason": "feedthrough_discharge_suspect"},
+        {"id": "ip-demo-3", "pv": "VALIP:D07_4U_H06_A02C4:CUR", "ring": "HER", "section": "D07",
+         "supply": "Agilent_4U", "severity": "danger", "severity_n": 3, "count": 9,
+         "series_count": [3, 4, 5, 6, 7, 8, 9, 9, 9],
+         "kind": "chronic", "deviation_dex": 0.1, "reason": "feedthrough_discharge_suspect"},
+        {"id": "ip-demo-4", "pv": "VALIP:D04_IP_L06:CUR", "ring": "LER", "section": "D04",
+         "supply": "KEK", "severity": "warning", "severity_n": 2,
+         "kind": "chronic", "deviation_dex": 0.3, "reason": "over_current"},
+        {"id": "ip-demo-5", "pv": "VALIP:D06_IP_L11:CUR", "ring": "LER", "section": "D06",
+         "supply": "KEK", "severity": "watch", "severity_n": 1,
+         "kind": "chronic", "deviation_dex": 0.0, "reason": "decoupled"},
+    ]
+    ip_sections = {r: {"D%02d" % i: None for i in range(1, 13)} for r in ("LER", "HER")}
+    for a in ip_anoms:
+        ip_sections[a["ring"]][a["section"]] = a["severity"]
 
     return {
         "updated": now,
@@ -122,9 +157,15 @@ def make_dummy_state():
         "summary": {"monitored": {"total": 605, "LER": 308, "HER": 297}, "critical": 2, "warning": 1},
         "anomalies": anomalies,
         "sections": sections,
+        "ion_pump_anomalies": ip_anoms,
+        "ip_sections": ip_sections,
     }
 
 def load_state():
+    # デモモードでは dashboard_state.json があっても内蔵ダミーを使う
+    # （ダミー series には abnormal が入っており、サイドバーのトレンドが正しく描ける）。
+    if os.environ.get("RECORD_RAW_DEMO"):
+        return make_dummy_state()
     if os.path.isfile(STATE_FILE):
         try:
             with open(STATE_FILE, encoding="utf-8") as f:
@@ -162,6 +203,8 @@ PAGE = r"""<!DOCTYPE html>
             flex-wrap: wrap; gap: 12px; padding-bottom: 16px; }
   .brand { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
   .brand h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  .ip-title { font-size: 17px; font-weight: 600; letter-spacing: .2px; color: var(--text); }
+  .section-title.ip-section { margin-top: 30px; }
   .ring-stat { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
   .dot.on { background: var(--ok); }
@@ -192,7 +235,29 @@ PAGE = r"""<!DOCTYPE html>
   .acard:hover { background: var(--surface2); }
   .acard.danger { border-left-color: var(--danger); }
   .acard.warning { border-left-color: var(--warning); }
+  .acard.watch { border-left-color: var(--faint); }
   .acard.sel { background: var(--surface2); border-color: var(--accent); }
+  /* イオンポンプ異常カード（CCG とは別セクション）*/
+  .ipcard { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+            background: var(--surface); border: 1px solid var(--line);
+            border-left: 3px solid var(--faint); border-radius: 0 10px 10px 0;
+            padding: 11px 15px; cursor: pointer; transition: background .12s; }
+  .ipcard:hover { background: var(--surface2); }
+  .ipcard.danger { border-left-color: var(--danger); }
+  .ipcard.warning { border-left-color: var(--warning); }
+  .ipcard.sel { background: var(--surface2); border-color: var(--accent); }
+  .sevtag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+            min-width: 38px; text-align: center; }
+  .sevtag.danger { background: var(--danger-bg); color: var(--danger-fg); }
+  .sevtag.warning { background: var(--warning-bg); color: var(--warning-fg); }
+  .sevtag.watch { background: var(--surface2); color: var(--muted); }
+  .kindtag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+  .kindtag.acute { background: #4a1d1d; color: #ff8f8f; border: 1px solid #7a2a2a; }
+  .kindtag.chronic { background: #2a2f1d; color: #d9d98f; border: 1px solid #4a4f2a; }
+  .kindtag.unknown { background: var(--surface2); color: var(--faint); }
+  .cnttag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+            background: var(--surface2); color: var(--muted); font-family: var(--mono); }
+  .devtag2 { font-size: 11px; color: var(--muted); font-family: var(--mono); }
   .count { min-width: 60px; text-align: center; }
   .count .n { font-size: 25px; font-weight: 600; line-height: 1; }
   .count.danger .n { color: var(--danger-fg); }
@@ -206,6 +271,7 @@ PAGE = r"""<!DOCTYPE html>
   .cause.danger { background: var(--danger-bg); color: var(--danger-fg); }
   .cause.warning { background: var(--warning-bg); color: var(--warning-fg); }
   .spark { flex-shrink: 0; }
+  .iptrend { flex-shrink: 0; }
 
   .detail { margin-top: 10px; background: var(--surface); border: 1px solid var(--accent);
             border-radius: 10px; padding: 16px 18px; }
@@ -230,9 +296,9 @@ PAGE = r"""<!DOCTYPE html>
           padding: 7px 0; border-radius: 6px; background: var(--surface);
           border: 1px solid var(--line); color: var(--muted); cursor: default; }
   .cell.danger { background: var(--danger-bg); border-color: var(--danger);
-                 color: var(--danger-fg); cursor: pointer; }
+                 color: var(--danger-fg); }
   .cell.warning { background: var(--warning-bg); border-color: var(--warning);
-                  color: var(--warning-fg); cursor: pointer; }
+                  color: var(--warning-fg); }
 
   .legend { display: flex; gap: 16px; margin-top: 14px; font-size: 12px; color: var(--muted); }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -299,15 +365,8 @@ PAGE = r"""<!DOCTYPE html>
   <div class="alist" id="alist"></div>
   <div id="detail-host"></div>
 
-  <div class="map">
-    <div class="section-title">リング配置（異常箇所をハイライト）</div>
-    <div id="map"></div>
-    <div class="legend">
-      <span><span class="sw" style="background:var(--danger)"></span> 要注意（カウント ≥6）</span>
-      <span><span class="sw" style="background:var(--warning)"></span> 注意（3–5）</span>
-      <span><span class="sw" style="background:var(--surface)"></span> 正常</span>
-    </div>
-  </div>
+  <div id="ip-anomalies"></div>
+  <div id="ip-detail-host"></div>
 
   <div id="ionpumps"></div>
 
@@ -317,8 +376,71 @@ PAGE = r"""<!DOCTYPE html>
 <script>
 let STATE = null;
 let SELECTED = null;
+let DETAIL_RENDERED = null;   // 現在 詳細ビューに描画済みのレコード id（不要な再描画防止）
 
-function fmtPres(v) { return (v * 1e8).toFixed(2) + "e-8"; }
+function fmtPres(v) {
+  if (!isFinite(v) || v <= 0) return "0";
+  const e = Math.floor(Math.log10(v));
+  const m = v / Math.pow(10, e);
+  return m.toFixed(2) + "e" + e;
+}
+
+// legacy「Abnormal Record Trend」相当のミニプロット。
+//   横軸: Period（フィル順, 古い→新しい）
+//   左軸: 異常数/P（トレーリング maxCount フィル内で異常と出た回数, 0〜maxCount）
+//   右軸: Beam[mA]（各フィルの調査データ最大電流）
+function trendPlot(a, color, w, h) {
+  const ser = a.series || {};
+  const beam = ser.beam || [];
+  const n = beam.length;
+  const maxCount = a.max_count || 8;
+  if (n < 2) return spark(ser, color, w, h);
+  if (!ser.abnormal) return spark(ser, color, w, h);
+  const abn = ser.abnormal;
+  const cnt = [];
+  for (let i = 0; i < n; i++) {
+    let c = 0;
+    for (let k = Math.max(0, i - maxCount + 1); k <= i; k++) c += (abn[k] || 0);
+    cnt.push(c);
+  }
+  const padL = 44, padR = 46, padT = 10, padB = 30;
+  const bmax = Math.max.apply(null, beam) || 1;
+  const X = i => padL + (i / (n - 1)) * (w - padL - padR);
+  const YC = v => padT + (1 - v / maxCount) * (h - padT - padB);
+  const YB = v => padT + (1 - v / bmax) * (h - padT - padB);
+  const cy = (padT + (h - padB)) / 2;
+  const FS = 11, FSL = 11;   // 目盛り / 軸ラベルのフォントサイズ
+  let s = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h +
+          '" style="display:block">';
+  // 横グリッド＋左右の目盛り（0 と max）
+  for (let g = 0; g <= 1; g++) {
+    const yy = padT + g * (h - padT - padB);
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (w - padR) + '" y2="' + yy + '" stroke="#2c313d"/>';
+    s += '<text x="' + (padL - 4) + '" y="' + (yy + 4) + '" fill="#9aa0ad" font-size="' + FS + '" text-anchor="end">' + (g === 0 ? maxCount : 0) + '</text>';
+    s += '<text x="' + (w - padR + 4) + '" y="' + (yy + 4) + '" fill="#5dcaa5" font-size="' + FS + '">' + (g === 0 ? Math.round(bmax) : 0) + '</text>';
+  }
+  // 縦グリッド＋ x 目盛り（Period: 新しい→古い順に 0,-1,-2…。混む場合は間引く）
+  const step = Math.max(1, Math.ceil(n / 7));
+  for (let i = n - 1; i >= 0; i--) {
+    const per = i - (n - 1);            // 右端=0, 左へ -1,-2,...
+    if (per % step !== 0) continue;
+    const xx = X(i);
+    s += '<line x1="' + xx.toFixed(1) + '" y1="' + padT + '" x2="' + xx.toFixed(1) + '" y2="' + (h - padB) + '" stroke="#23272f"/>';
+    s += '<text x="' + xx.toFixed(1) + '" y="' + (h - padB + 14) + '" fill="#9aa0ad" font-size="' + FS + '" text-anchor="middle">' + per + '</text>';
+  }
+  // 軸ラベル（縦書き：左 +90°, 右 -90°、目盛り数字とかぶらない外側に配置）
+  s += '<text transform="rotate(-90 11 ' + cy.toFixed(1) + ')" x="11" y="' + cy.toFixed(1) + '" fill="' + color + '" font-size="' + FSL + '" text-anchor="middle">Anomaly Count</text>';
+  s += '<text transform="rotate(-90 ' + (w - 9) + ' ' + cy.toFixed(1) + ')" x="' + (w - 9) + '" y="' + cy.toFixed(1) + '" fill="#5dcaa5" font-size="' + FSL + '" text-anchor="middle">Beam [mA]</text>';
+  s += '<text x="' + ((padL + w - padR) / 2) + '" y="' + (h - 3) + '" fill="#9aa0ad" font-size="' + FS + '" text-anchor="middle">Period</text>';
+  // ビーム電流（緑・点線, 右軸）
+  s += '<polyline points="' + beam.map((v, i) => X(i).toFixed(1) + ',' + YB(v).toFixed(1)).join(' ') +
+       '" fill="none" stroke="#5dcaa5" stroke-width="1.4" stroke-dasharray="3,2"/>';
+  // 異常数（severity の色・実線, 左軸）
+  s += '<polyline points="' + cnt.map((v, i) => X(i).toFixed(1) + ',' + YC(v).toFixed(1)).join(' ') +
+       '" fill="none" stroke="' + color + '" stroke-width="2"/>';
+  s += '</svg>';
+  return s;
+}
 
 function spark(series, color, w, h) {
   const p = series.pressure;
@@ -416,40 +538,78 @@ function renderList(s) {
       '<div class="count ' + sev + '"><div class="n">' + a.count + '</div>' +
       '<div class="of">/ ' + a.max_count + ' checks</div></div>' +
       '<div class="ainfo"><div class="rec">' + a.record + '</div>' +
-      '<div class="loc">' + a.ring + ' ' + a.section + (a.place ? ' · ' + a.place : '') + ' · ' + a.period + '</div>' +
+      '<div class="loc">' + a.ring + ' ' + a.section + ' · ' + a.period + '</div>' +
       '<span class="cause ' + sev + '">推定: ' + a.cause + '</span></div>' +
-      spark(a.series, sevColor(sev), 120, 38) + '</div>';
+      trendPlot(a, sevColor(sev), 240, 112) + '</div>';
   }).join("");
 }
 
 function renderDetail() {
   const host = document.getElementById("detail-host");
-  if (!SELECTED) { host.innerHTML = ""; return; }
+  if (!SELECTED) {
+    if (DETAIL_RENDERED !== null) { host.innerHTML = ""; DETAIL_RENDERED = null; }
+    return;
+  }
+  // 既に同じレコードを表示中なら何もしない（5秒ごとの自動更新で再描画・再取得・
+  // 強制スクロールが起きてプロットが点滅／スクロールが戻る問題を防ぐ）。
+  if (SELECTED === DETAIL_RENDERED) return;
   const a = STATE.anomalies.find(x => x.id === SELECTED);
-  if (!a) { host.innerHTML = ""; return; }
-  const place = a.place ? (a.place + " · ") : "";
-  const hasSeries = a.series && a.series.pressure && a.series.pressure.length > 0;
-  const plots = hasSeries
-    ? ('<div class="plotrow">' +
-        '<div class="plotbox"><div class="cap">圧力 vs フィル（直近）[Pa]</div>' +
-          linePlot(a.series.t, a.series.pressure, "#e2574a", 640, 150, fmtPres) + '</div>' +
-        '<div class="plotbox"><div class="cap">ビーム電流 vs フィル（直近）[mA]</div>' +
-          linePlot(a.series.t, a.series.beam, "#5dcaa5", 640, 110, v => Math.round(v)) + '</div>' +
-      '</div>')
-    : ('<div class="plotbox" style="text-align:center;color:var(--muted);padding:22px">' +
-        '圧力トレンドは次段階で接続予定</div>');
+  if (!a) { host.innerHTML = ""; DETAIL_RENDERED = null; return; }
+  DETAIL_RENDERED = SELECTED;
   host.innerHTML =
     '<div class="detail"><h3>' + a.record + '</h3>' +
-    '<div class="sub">' + a.ring + ' ' + a.section + ' · ' + place +
+    '<div class="sub">' + a.ring + ' ' + a.section + ' · ' +
       a.period + ' 部 · 推定原因: ' + a.cause + '</div>' +
-    plots +
+    '<div id="raw-plots"><div class="plotbox" style="text-align:center;color:var(--muted);padding:22px">' +
+      '生データを取得中…</div></div>' +
     '<div class="btns">' +
       '<button onclick="saveLabel(\'Normal\')">Normal として保存</button>' +
       '<button onclick="saveLabel(\'Abnormal\')">Abnormal として保存</button>' +
       '<button class="close" onclick="select(null)">閉じる</button>' +
     '</div></div>';
   host.scrollIntoView({behavior: "smooth", block: "nearest"});
+  loadRaw(a);
 }
+
+async function loadRaw(a) {
+  let v;
+  try {
+    const r = await fetch("/api/raw?ring=" + encodeURIComponent(a.ring) +
+                          "&record=" + encodeURIComponent(a.record), {cache: "no-store"});
+    v = await r.json();
+  } catch (e) { v = {error: "取得に失敗しました: " + e}; }
+  const box = document.getElementById("raw-plots");
+  if (!box || SELECTED !== a.id) return;   // 別レコードに切替済みなら破棄
+  const note = msg => '<div class="plotbox" style="text-align:center;color:var(--muted);padding:22px">' +
+                      msg + '</div>';
+  if (!v || v.error) { box.innerHTML = note(v && v.error ? v.error : "生データを取得できませんでした"); return; }
+  const w = v.windows || {};
+  let html = "";
+  if (v.storage && v.storage.beam && v.storage.beam.length) {
+    html += '<div class="plotbox"><div class="cap">圧力 vs ビーム電流（調査' +
+            (w.chk_strg ? ' ' + fmtWin(w.chk_strg) : '') +
+            '）　モデル: 圧力=w0·I+w1·(I²/Nb)²+w2　' +
+            '<span style="color:#e2574a">●実測</span> ' +
+            '<span style="color:#e2574a">━調査回帰</span> ' +
+            '<span style="color:#9ec5fe">━基準回帰</span></div>' +
+            scatterPlot(v.storage, v.reference) + '</div>';
+    html += '<div class="plotbox"><div class="cap">圧力＆ビーム電流 vs 時刻（調査）　' +
+            '<span style="color:#e2574a">━圧力[Pa]</span> ' +
+            '<span style="color:#5dcaa5">┄ビーム電流[mA]</span></div>' +
+            timeSeriesDual(v.storage) + '</div>';
+  }
+  box.innerHTML = html || note("表示できる生データがありません（窓ファイル未生成かレコード名不一致）");
+}
+
+// "YYYYMMDDhhmmss" または "start-end" を見やすく整形
+function fmtWin(s) {
+  const one = x => (x && x.length === 14)
+    ? (x.slice(4,6)+"/"+x.slice(6,8)+" "+x.slice(8,10)+":"+x.slice(10,12)) : x;
+  if (s && s.indexOf("-") > 0) { const p = s.split("-"); return one(p[0]) + "〜" + one(p[1]); }
+  return one(s);
+}
+// "MM/DD/YYYY HH:MM:SS" → "HH:MM"
+function hhmm(ts) { const m = /(\d{2}:\d{2}):\d{2}/.exec(ts || ""); return m ? m[1] : ""; }
 
 function linePlot(t, y, color, w, h, fmt) {
   const pad = 38, padR = 10, padT = 10, padB = 22;
@@ -471,6 +631,78 @@ function linePlot(t, y, color, w, h, fmt) {
   return svg;
 }
 
+// 圧力 vs ビーム電流の散布図（実測点＋調査回帰=青＋基準回帰=薄青）。legacy Make_Plot_Strg 相当。
+function scatterPlot(storage, reference) {
+  const w = 640, h = 240, padL = 78, padR = 14, padT = 12, padB = 36;
+  let xs = storage.beam.slice(), ys = storage.pressure.slice();
+  if (reference && reference.beam) { xs = xs.concat(reference.beam); ys = ys.concat(reference.pressure); }
+  [storage.fit_chk, storage.fit_std].forEach(f => { if (f) { xs = xs.concat(f.beam); ys = ys.concat(f.pred); } });
+  const xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
+  const ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
+  const xr = (xmax - xmin) || 1, yr = (ymax - ymin) || 1;
+  const X = v => padL + ((v - xmin) / xr) * (w - padL - padR);
+  const Y = v => padT + (1 - (v - ymin) / yr) * (h - padT - padB);
+  let s = '<svg width="100%" viewBox="0 0 ' + w + ' ' + h + '" style="display:block">';
+  for (let g = 0; g <= 3; g++) {
+    const yy = padT + g * (h - padT - padB) / 3;
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (w - padR) + '" y2="' + yy + '" stroke="#2c313d"/>';
+    s += '<text x="' + (padL - 6) + '" y="' + (yy + 4) + '" fill="#6b7080" font-size="11" text-anchor="end">' + fmtPres(ymax - g * yr / 3) + '</text>';
+  }
+  for (let g = 0; g <= 3; g++) {
+    const xx = padL + g * (w - padL - padR) / 3;
+    s += '<text x="' + xx.toFixed(0) + '" y="' + (h - padB + 16) + '" fill="#6b7080" font-size="11" text-anchor="middle">' +
+         Math.round(xmin + g * xr / 3) + '</text>';
+  }
+  s += '<text x="' + ((padL + w - padR) / 2) + '" y="' + (h - 5) + '" fill="#6b7080" font-size="11" text-anchor="middle">ビーム電流 [mA]</text>';
+  s += '<text transform="rotate(-90 14 ' + ((padT + h - padB) / 2).toFixed(1) + ')" x="14" y="' +
+       ((padT + h - padB) / 2).toFixed(1) + '" fill="#9aa0ad" font-size="11" text-anchor="middle">圧力 [Pa]</text>';
+  if (reference && reference.beam) {
+    for (let i = 0; i < reference.beam.length; i++)
+      s += '<circle cx="' + X(reference.beam[i]).toFixed(1) + '" cy="' + Y(reference.pressure[i]).toFixed(1) + '" r="1.7" fill="#9ec5fe" opacity="0.45"/>';
+  }
+  for (let i = 0; i < storage.beam.length; i++)
+    s += '<circle cx="' + X(storage.beam[i]).toFixed(1) + '" cy="' + Y(storage.pressure[i]).toFixed(1) + '" r="2.2" fill="#e2574a" opacity="0.75"/>';
+  const fitCurve = (f, color, wd) => {
+    if (!f || !f.beam || f.beam.length < 2) return '';
+    const pts = f.beam.map((b, i) => X(b).toFixed(1) + ',' + Y(f.pred[i]).toFixed(1)).join(' ');
+    return '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="' + wd + '"/>';
+  };
+  s += fitCurve(storage.fit_std, "#9ec5fe", 2);
+  s += fitCurve(storage.fit_chk, "#e2574a", 2.4);
+  s += '</svg>';
+  return s;
+}
+
+// 圧力（左軸・赤）＆ビーム電流（右軸・緑点線）vs 時刻。legacy Make_Plot_Strg_Time 相当。
+function timeSeriesDual(storage) {
+  const t = storage.t, P = storage.pressure, B = storage.beam, n = t.length;
+  const w = 640, h = 175, padL = 78, padR = 64, padT = 12, padB = 28;
+  const pmin = Math.min.apply(null, P), pmax = Math.max.apply(null, P), pr = (pmax - pmin) || 1;
+  const bmax = Math.max.apply(null, B) || 1, br = bmax || 1;
+  const X = i => padL + (i / ((n - 1) || 1)) * (w - padL - padR);
+  const YP = v => padT + (1 - (v - pmin) / pr) * (h - padT - padB);
+  const YB = v => padT + (1 - v / br) * (h - padT - padB);
+  let s = '<svg width="100%" viewBox="0 0 ' + w + ' ' + h + '" style="display:block">';
+  for (let g = 0; g <= 2; g++) {
+    const yy = padT + g * (h - padT - padB) / 2;
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (w - padR) + '" y2="' + yy + '" stroke="#2c313d"/>';
+    s += '<text x="' + (padL - 6) + '" y="' + (yy + 4) + '" fill="#e2574a" font-size="11" text-anchor="end">' + fmtPres(pmax - g * pr / 2) + '</text>';
+    s += '<text x="' + (w - padR + 6) + '" y="' + (yy + 4) + '" fill="#5dcaa5" font-size="11">' + Math.round(bmax - g * br / 2) + '</text>';
+  }
+  [0, Math.floor((n - 1) / 2), n - 1].forEach(i => {
+    if (i >= 0 && i < n) s += '<text x="' + X(i).toFixed(1) + '" y="' + (h - 8) + '" fill="#6b7080" font-size="10" text-anchor="middle">' + hhmm(t[i]) + '</text>';
+  });
+  s += '<text transform="rotate(-90 14 ' + ((padT + h - padB) / 2).toFixed(1) + ')" x="14" y="' +
+       ((padT + h - padB) / 2).toFixed(1) + '" fill="#e2574a" font-size="11" text-anchor="middle">圧力 [Pa]</text>';
+  s += '<text transform="rotate(-90 ' + (w - 9) + ' ' + ((padT + h - padB) / 2).toFixed(1) + ')" x="' + (w - 9) + '" y="' +
+       ((padT + h - padB) / 2).toFixed(1) + '" fill="#5dcaa5" font-size="11" text-anchor="middle">ビーム電流 [mA]</text>';
+  s += '<polyline points="' + P.map((v, i) => X(i).toFixed(1) + ',' + YP(v).toFixed(1)).join(" ") + '" fill="none" stroke="#e2574a" stroke-width="2"/>';
+  s += '<polyline points="' + B.map((v, i) => X(i).toFixed(1) + ',' + YB(v).toFixed(1)).join(" ") + '" fill="none" stroke="#5dcaa5" stroke-width="1.6" stroke-dasharray="3,2"/>';
+  s += '</svg>';
+  return s;
+}
+
+
 function renderMap(s) {
   const host = document.getElementById("map");
   host.innerHTML = mapRow("LER", s.sections.LER) + mapRow("HER", s.sections.HER);
@@ -480,8 +712,9 @@ function mapRow(ring, secs) {
   for (let i = 1; i <= 12; i++) {
     const key = "D" + String(i).padStart(2, "0");
     const sev = secs[key];
-    const onClick = sev ? ' onclick="selectSection(\'' + ring + '\',\'' + key + '\')"' : '';
-    cells += '<div class="cell ' + (sev || '') + '"' + onClick + '>' + key + '</div>';
+    // セクションは異常箇所のハイライト表示のみ（クリック不可）。
+    // 1セクションに複数の異常があるとクリックで何が出るか曖昧なため、表示専用にする。
+    cells += '<div class="cell ' + (sev || '') + '">' + key + '</div>';
   }
   return '<div class="maprow"><div class="rl">' + ring + '</div><div class="cells">' + cells + '</div></div>';
 }
@@ -491,11 +724,42 @@ function selectSection(ring, sec) {
   const a = STATE.anomalies.find(x => x.ring === ring && x.section === sec);
   if (a) select(a.id);
 }
-function saveLabel(kind) {
-  // プロトタイプではダミー。実運用では検知側の Save 機能に POST して
-  // *_FNN_{Normal,Abnormal}_* に追記する想定。
+async function saveLabel(kind) {
   const a = STATE.anomalies.find(x => x.id === SELECTED);
-  alert("[プロトタイプ] " + (a ? a.record : "") + " を " + kind + " として保存（実運用では学習データに追記）");
+  if (!a) return;
+  const jp = (kind === "Normal") ? "正常(Normal)" : "異常(Abnormal)";
+  if (!confirm(a.record + " を " + jp + " として教師ラベルに登録します。よろしいですか？\n" +
+               "（この操作はラベルをキューに溜めるだけで、再学習は別途実行します）")) return;
+  const payload = {
+    ring: a.ring, record: a.record, period: a.period,
+    abort_time: a.abort_time, beam_at_check: a.beam_at_check, klass: kind,
+  };
+  try {
+    const r = await fetch("/api/label", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const res = await r.json();
+    if (res && res.ok) toast(a.record + " を " + jp + " としてラベル登録しました（キュー件数 " + res.queued + "）");
+    else toast("登録に失敗しました: " + (res && res.error ? res.error : "不明"), true);
+  } catch (e) { toast("登録に失敗しました: " + e, true); }
+}
+
+function toast(msg, isErr) {
+  let t = document.getElementById("toast");
+  if (!t) {
+    t = document.createElement("div"); t.id = "toast";
+    t.style.cssText = "position:fixed;left:50%;bottom:26px;transform:translateX(-50%);" +
+      "padding:11px 18px;border-radius:10px;font-size:13px;z-index:9999;" +
+      "box-shadow:0 6px 24px rgba(0,0,0,.4);max-width:80vw;";
+    document.body.appendChild(t);
+  }
+  t.style.background = isErr ? "#4a1d1d" : "#1d3a2a";
+  t.style.color = isErr ? "#ff9f9f" : "#9fe0bf";
+  t.style.border = "1px solid " + (isErr ? "#7a2a2a" : "#2a6a4a");
+  t.textContent = msg; t.style.opacity = "1";
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(() => { t.style.transition = "opacity .5s"; t.style.opacity = "0"; }, 3600);
 }
 
 async function refreshLoad() {
@@ -526,6 +790,216 @@ async function refreshLoad() {
     const el = document.getElementById("sysload");
     el.className = "pill"; el.textContent = "負荷 —";
   }
+}
+
+// ── イオンポンプ異常（ip_judge 結果）専用セクション ─────────────────
+let IP_SELECTED = null;
+let IP_DETAIL_RENDERED = null;
+const IP_REASON_JP = {feedthrough_discharge_suspect: "フィードスルー放電疑い",
+  over_current: "電流上振れ", decoupled: "相関崩れ", pumping_degradation: "排気劣化"};
+const IP_KIND_JP = {acute: "急性", chronic: "慢性", unknown: "不明"};
+
+function renderIPAnomalies(s) {
+  const host = document.getElementById("ip-anomalies");
+  // 表示ゲート: sev3 のみ（sev1/2 はカードに出さない。本番は state_builder でも同ゲート）。
+  const list = (s.ion_pump_anomalies || []).filter(a => (a.severity_n || 0) >= 3);
+  if (!list.length) { host.innerHTML = ""; return; }
+  let html = '<div class="section-title ip-section"><span class="ip-title">イオンポンプ 異常モニター</span>' +
+             '（sev3 が継続したもののみ・急性を上に表示）</div>';
+  list.forEach(a => {
+    const sev = a.severity;
+    const dev = (a.deviation_dex != null)
+      ? ((a.deviation_dex >= 0 ? "+" : "") + a.deviation_dex.toFixed(1) + " dex") : "";
+    const kindTag = a.kind
+      ? '<span class="kindtag ' + a.kind + '">' + (IP_KIND_JP[a.kind] || a.kind) + '</span>' : "";
+    const cntTag = (a.count != null)
+      ? '<span class="cnttag">' + a.count + ' 回連続</span>' : "";
+    html += '<div class="ipcard ' + sev + (IP_SELECTED === a.id ? ' sel' : '') +
+      '" onclick="ipSelect(\'' + a.id + '\')">' +
+      '<span class="sevtag ' + sev + '">sev' + a.severity_n + '</span>' + kindTag + cntTag +
+      '<span class="ainfo"><span class="rec">' + a.pv + '</span>' +
+      '<div class="sub">' + a.ring + ' ' + a.section + ' · ' + (a.supply || "") + ' · ' +
+        (IP_REASON_JP[a.reason] || a.reason) + '</div></span>' +
+      '<span class="devtag2">' + dev + '</span>' +
+      ipTrendPlot(a.series_count || [a.count || 0], sevColor(sev), 210, 70) + '</div>';
+  });
+  host.innerHTML = html;
+}
+
+// イオンポンプ異常カウントの推移（各 judge サイクルの累積 sev3 カウント＝「N 回連続」の履歴）。
+//   横軸: judge サイクル（古い→新しい・右端が最新）  縦軸: 連続カウント 0..max
+function ipTrendPlot(counts, color, w, h) {
+  const c = (counts && counts.length) ? counts : [0];
+  const n = c.length;
+  const padL = 34, padR = 8, padT = 8, padB = 16;
+  const cmax = Math.max(Math.max.apply(null, c), 4);
+  const X = i => padL + (n <= 1 ? 0.5 : i / (n - 1)) * (w - padL - padR);
+  const Y = v => padT + (1 - v / cmax) * (h - padT - padB);
+  let s = '<svg class="iptrend" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h +
+          '" style="display:block">';
+  for (let g = 0; g <= 1; g++) {            // 横グリッド＋ y 目盛り（0 と max）
+    const yy = padT + g * (h - padT - padB);
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (w - padR) + '" y2="' + yy + '" stroke="#2c313d"/>';
+    s += '<text x="' + (padL - 4) + '" y="' + (yy + 4) + '" fill="#9aa0ad" font-size="10" text-anchor="end">' +
+         (g === 0 ? cmax : 0) + '</text>';
+  }
+  const line = c.map((v, i) => X(i).toFixed(1) + ',' + Y(v).toFixed(1)).join(' ');
+  const area = padL + ',' + Y(0).toFixed(1) + ' ' + line + ' ' + X(n - 1).toFixed(1) + ',' + Y(0).toFixed(1);
+  s += '<polygon points="' + area + '" fill="' + color + '" opacity="0.13"/>';
+  s += '<polyline points="' + line + '" fill="none" stroke="' + color + '" stroke-width="2"/>';
+  s += '<circle cx="' + X(n - 1).toFixed(1) + '" cy="' + Y(c[n - 1]).toFixed(1) + '" r="2.6" fill="' + color + '"/>';
+  const cy = (padT + (h - padB)) / 2;
+  s += '<text transform="rotate(-90 10 ' + cy.toFixed(1) + ')" x="10" y="' + cy.toFixed(1) +
+       '" fill="#9aa0ad" font-size="9" text-anchor="middle">Anomaly Count</text>';
+  s += '<text x="' + ((padL + w - padR) / 2) + '" y="' + (h - 4) +
+       '" fill="#6b7080" font-size="9" text-anchor="middle">Judge Cycle</text>';
+  s += '</svg>';
+  return s;
+}
+
+function ipSelect(id) {
+  IP_SELECTED = (IP_SELECTED === id) ? null : id;
+  renderIPAnomalies(STATE); renderIPDetail();
+}
+
+function renderIPDetail() {
+  const host = document.getElementById("ip-detail-host");
+  if (!IP_SELECTED) {
+    if (IP_DETAIL_RENDERED !== null) { host.innerHTML = ""; IP_DETAIL_RENDERED = null; }
+    return;
+  }
+  if (IP_SELECTED === IP_DETAIL_RENDERED) return;
+  const a = (STATE.ion_pump_anomalies || []).find(x => x.id === IP_SELECTED);
+  if (!a) { host.innerHTML = ""; IP_DETAIL_RENDERED = null; return; }
+  IP_DETAIL_RENDERED = IP_SELECTED;
+  host.innerHTML =
+    '<div class="detail"><h3>' + a.pv + '</h3>' +
+    '<div class="sub">' + a.ring + ' ' + a.section + ' · ' + (a.supply || "") + ' · ' +
+      (IP_REASON_JP[a.reason] || a.reason) +
+      (a.kind ? (' · ' + (IP_KIND_JP[a.kind] || a.kind)) : "") +
+      (a.deviation_dex != null ? '（' + (a.deviation_dex >= 0 ? "+" : "") + a.deviation_dex.toFixed(1) + ' dex）' : "") +
+      '</div>' +
+    '<div id="ip-raw-plots"><div class="plotbox" style="text-align:center;color:var(--muted);padding:22px">' +
+      '生データを取得中…</div></div>' +
+    '<div class="btns"><button class="close" onclick="ipSelect(\'' + a.id + '\')">閉じる</button></div></div>';
+  host.scrollIntoView({behavior: "smooth", block: "nearest"});
+  loadIPRaw(a);
+}
+
+async function loadIPRaw(a) {
+  let v;
+  try {
+    const r = await fetch("/api/ip_raw?ring=" + encodeURIComponent(a.ring) +
+                          "&record=" + encodeURIComponent(a.pv), {cache: "no-store"});
+    v = await r.json();
+  } catch (e) { v = {error: "取得に失敗しました: " + e}; }
+  const box = document.getElementById("ip-raw-plots");
+  if (!box || IP_SELECTED !== a.id) return;
+  const note = m => '<div class="plotbox" style="text-align:center;color:var(--muted);padding:22px">' + m + '</div>';
+  if (!v || v.error) { box.innerHTML = note(v && v.error ? v.error : "取得できませんでした"); return; }
+  let html = "";
+  if (v.current && v.current.t && v.current.t.length) {
+    html += '<div class="plotbox"><div class="cap">放電電流 vs 時刻（直近・無ビーム区間を網掛け）[A]　' +
+            '<span style="color:#9ec5fe">▤ 学習バンド(p50–p95)</span></div>' +
+            currentTimePlot(v.current, v.band) + '</div>';
+  }
+  if (v.scatter && v.scatter.P && v.scatter.P.length) {
+    html += '<div class="plotbox"><div class="cap">電流 vs 圧力（I-P・両対数）　' +
+            '<span style="color:#e2574a">●実測</span> ' +
+            '<span style="color:#e2574a">━ I=a·P^b 回帰</span> ' +
+            '<span style="color:#9ec5fe">┄ 学習 I=a·P^b</span></div>' +
+            ipScatter(v.scatter, v.learned_fit) + '</div>';
+  }
+  box.innerHTML = html || note("表示できる生データがありません");
+}
+
+// 放電電流 vs 時刻（対数縦軸・無ビーム区間を網掛け・学習バンド p50-p95 を水平帯で重ねる）
+function currentTimePlot(cur, band) {
+  const I = cur.I, t = cur.t, beam = cur.beam, n = I.length;
+  const w = 640, h = 200, padL = 78, padR = 14, padT = 12, padB = 28;
+  const li = I.map(v => Math.log10(v > 0 ? v : 1e-12));
+  let ay = li.slice();
+  if (band) { ay = ay.concat([band.p50, band.p95]); }   // バンドも軸範囲に含める
+  const ymin = Math.min.apply(null, ay), ymax = Math.max.apply(null, ay), yr = (ymax - ymin) || 1;
+  const X = i => padL + (i / ((n - 1) || 1)) * (w - padL - padR);
+  const Y = v => padT + (1 - (v - ymin) / yr) * (h - padT - padB);
+  let s = '<svg width="100%" viewBox="0 0 ' + w + ' ' + h + '" style="display:block">';
+  // 学習バンド（電流 p50–p95 の水平帯）
+  if (band) {
+    const yhi = Y(band.p95), ylo = Y(band.p50);
+    s += '<rect x="' + padL + '" y="' + Math.min(yhi, ylo).toFixed(1) + '" width="' + (w - padL - padR) +
+         '" height="' + Math.abs(ylo - yhi).toFixed(1) + '" fill="#9ec5fe" opacity="0.13"/>';
+    s += '<line x1="' + padL + '" y1="' + yhi.toFixed(1) + '" x2="' + (w - padR) + '" y2="' + yhi.toFixed(1) +
+         '" stroke="#9ec5fe" stroke-width="1" stroke-dasharray="4,3"/>';
+    s += '<text x="' + (w - padR - 2) + '" y="' + (yhi - 3).toFixed(1) + '" fill="#9ec5fe" font-size="10" text-anchor="end">p95</text>';
+  }
+  // 無ビーム区間（beam<10 or null）の網掛け
+  let i = 0;
+  while (i < n) {
+    if (beam[i] == null || beam[i] < 10) {
+      let j = i; while (j < n && (beam[j] == null || beam[j] < 10)) j++;
+      const x0 = X(i), x1 = X(Math.max(i, j - 1));
+      s += '<rect x="' + x0.toFixed(1) + '" y="' + padT + '" width="' + Math.max(1, x1 - x0).toFixed(1) +
+           '" height="' + (h - padT - padB) + '" fill="#ffffff" opacity="0.05"/>';
+      i = j;
+    } else i++;
+  }
+  for (let g = 0; g <= 3; g++) {
+    const yy = padT + g * (h - padT - padB) / 3, val = ymax - g * yr / 3;
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (w - padR) + '" y2="' + yy + '" stroke="#2c313d"/>';
+    s += '<text x="' + (padL - 6) + '" y="' + (yy + 4) + '" fill="#6b7080" font-size="11" text-anchor="end">' + fmtPres(Math.pow(10, val)) + '</text>';
+  }
+  [0, Math.floor((n - 1) / 2), n - 1].forEach(k => {
+    if (k >= 0 && k < n) s += '<text x="' + X(k).toFixed(1) + '" y="' + (h - 8) +
+      '" fill="#6b7080" font-size="10" text-anchor="middle">' + hhmm(t[k]) + '</text>';
+  });
+  s += '<polyline points="' + li.map((v, k) => X(k).toFixed(1) + ',' + Y(v).toFixed(1)).join(' ') +
+       '" fill="none" stroke="#e2574a" stroke-width="1.8"/>';
+  s += '<text transform="rotate(-90 14 ' + ((padT + h - padB) / 2).toFixed(1) + ')" x="14" y="' +
+       ((padT + h - padB) / 2).toFixed(1) + '" fill="#9aa0ad" font-size="11" text-anchor="middle">放電電流 [A]</text>';
+  s += '</svg>';
+  return s;
+}
+
+// I-P 散布図（両対数）＋ I=a·P^b 回帰線
+function ipScatter(scat, learnedFit) {
+  const P = scat.P, I = scat.I, n = P.length;
+  const lx = P.map(v => Math.log10(v)), ly = I.map(v => Math.log10(v));
+  let ax = lx.slice(), ay = ly.slice();
+  if (scat.fit) { scat.fit.P.forEach(p => ax.push(Math.log10(p))); scat.fit.I.forEach(v => ay.push(Math.log10(v))); }
+  const w = 640, h = 230, padL = 78, padR = 14, padT = 12, padB = 36;
+  const xmin = Math.min.apply(null, ax), xmax = Math.max.apply(null, ax), xr = (xmax - xmin) || 1;
+  const ymin = Math.min.apply(null, ay), ymax = Math.max.apply(null, ay), yr = (ymax - ymin) || 1;
+  const X = v => padL + ((v - xmin) / xr) * (w - padL - padR);
+  const Y = v => padT + (1 - (v - ymin) / yr) * (h - padT - padB);
+  let s = '<svg width="100%" viewBox="0 0 ' + w + ' ' + h + '" style="display:block">';
+  for (let g = 0; g <= 3; g++) {
+    const yy = padT + g * (h - padT - padB) / 3, val = ymax - g * yr / 3;
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (w - padR) + '" y2="' + yy + '" stroke="#2c313d"/>';
+    s += '<text x="' + (padL - 6) + '" y="' + (yy + 4) + '" fill="#6b7080" font-size="11" text-anchor="end">' + fmtPres(Math.pow(10, val)) + '</text>';
+  }
+  for (let g = 0; g <= 3; g++) {
+    const xx = padL + g * (w - padL - padR) / 3, val = xmin + g * xr / 3;
+    s += '<text x="' + xx.toFixed(0) + '" y="' + (h - padB + 16) + '" fill="#6b7080" font-size="11" text-anchor="middle">' + fmtPres(Math.pow(10, val)) + '</text>';
+  }
+  s += '<text x="' + ((padL + w - padR) / 2) + '" y="' + (h - 5) + '" fill="#6b7080" font-size="11" text-anchor="middle">圧力 [Pa]</text>';
+  s += '<text transform="rotate(-90 14 ' + ((padT + h - padB) / 2).toFixed(1) + ')" x="14" y="' +
+       ((padT + h - padB) / 2).toFixed(1) + '" fill="#9aa0ad" font-size="11" text-anchor="middle">放電電流 [A]</text>';
+  for (let k = 0; k < n; k++)
+    s += '<circle cx="' + X(lx[k]).toFixed(1) + '" cy="' + Y(ly[k]).toFixed(1) + '" r="2.1" fill="#e2574a" opacity="0.7"/>';
+  // 学習 I=a·P^b（薄青の参照線）
+  if (learnedFit && learnedFit.a && learnedFit.b) {
+    const px = [xmin, xmax];
+    const pl = px.map(lp => X(lp).toFixed(1) + ',' + Y(Math.log10(learnedFit.a) + learnedFit.b * lp).toFixed(1)).join(' ');
+    s += '<polyline points="' + pl + '" fill="none" stroke="#9ec5fe" stroke-width="1.8" stroke-dasharray="5,3"/>';
+  }
+  // 判定窓の I=a·P^b 回帰（青・実線）
+  if (scat.fit) {
+    const fl = scat.fit.P.map((p, k) => X(Math.log10(p)).toFixed(1) + ',' + Y(Math.log10(scat.fit.I[k])).toFixed(1)).join(' ');
+    s += '<polyline points="' + fl + '" fill="none" stroke="#e2574a" stroke-width="2.2"/>';
+  }
+  s += '</svg>';
+  return s;
 }
 
 // ── イオンポンプ放電電流（開発中・判定なし）──────────────────────
@@ -559,6 +1033,14 @@ function sparkIP(trend, color, w, h) {
 }
 
 function renderIonPumps(s) {
+  // 旧「イオンポンプ 放電電流（開発中・判定なし）」観測パネルは非表示。
+  // 判定済みの「イオンポンプ 異常モニター」(renderIPAnomalies) に一本化した。
+  const host = document.getElementById("ionpumps");
+  if (host) host.innerHTML = "";
+  return;
+}
+
+function _renderIonPumps_disabled(s) {
   const host = document.getElementById("ionpumps");
   const ip = s.ion_pumps;
   if (!ip || !ip.rings) { host.innerHTML = ""; return; }   // データ無ければ非表示
@@ -608,6 +1090,7 @@ function renderIonPumps(s) {
 
 function toggleIP(ring, section) {
   IP_SEL[ring] = (IP_SEL[ring] === section) ? null : section;
+  renderIPAnomalies(STATE); renderIPDetail();
   renderIonPumps(STATE);
 }
 
@@ -617,7 +1100,7 @@ async function refresh() {
     STATE = await r.json();
     if (STATE.error) { document.getElementById("footnote").textContent = STATE.error; return; }
     renderTop(STATE); renderSummary(STATE); renderList(STATE);
-    renderMap(STATE); renderDetail(); renderIonPumps(STATE);
+    renderDetail(); renderIPAnomalies(STATE); renderIPDetail(); renderIonPumps(STATE);
     document.getElementById("footnote").textContent =
       "5 秒ごとに自動更新。データ源: " + (STATE._source || "dashboard_state.json / ダミー");
   } catch (e) {
@@ -646,6 +1129,43 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        if self.path.startswith("/api/label"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+            except Exception as e:
+                self._send(400, json.dumps({"ok": False, "error": "bad request: %s" % e}).encode("utf-8"),
+                           "application/json; charset=utf-8")
+                return
+            klass = body.get("klass")
+            record = body.get("record")
+            ring = body.get("ring")
+            if klass not in ("Normal", "Abnormal") or not record or ring not in ("LER", "HER"):
+                self._send(400, json.dumps({"ok": False, "error": "klass/record/ring が不正です"}).encode("utf-8"),
+                           "application/json; charset=utf-8")
+                return
+            entry = {
+                "ts": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "ring": ring, "record": record,
+                "period": body.get("period"),
+                "abort_time": body.get("abort_time"),
+                "beam_at_check": body.get("beam_at_check"),
+                "klass": klass, "status": "queued",
+            }
+            try:
+                with open(LABEL_QUEUE, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                queued = sum(1 for _ in open(LABEL_QUEUE, encoding="utf-8"))
+            except Exception as e:
+                self._send(500, json.dumps({"ok": False, "error": "保存に失敗: %s" % e}).encode("utf-8"),
+                           "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps({"ok": True, "queued": queued}, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        else:
+            self._send(404, b'{"error":"not found"}', "application/json; charset=utf-8")
+
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
@@ -661,8 +1181,33 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body.encode("utf-8"), "application/json; charset=utf-8")
         elif self.path.startswith("/api/state"):
             state = load_state()
-            state["_source"] = "dashboard_state.json" if os.path.isfile(STATE_FILE) else "内蔵ダミーデータ"
+            if os.environ.get("RECORD_RAW_DEMO"):
+                state["_source"] = "デモ（合成データ）"
+            else:
+                state["_source"] = "dashboard_state.json" if os.path.isfile(STATE_FILE) else "内蔵ダミーデータ"
             self._send(200, json.dumps(state, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        elif self.path.startswith("/api/ip_raw"):
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            ring = (q.get("ring", [""])[0] or "").upper()
+            record = q.get("record", [""])[0]
+            if record_raw is None:
+                body = {"error": "record_raw を読み込めません（numpy 未導入の可能性）"}
+            else:
+                body = record_raw.build_ip_view(ring, record)
+            self._send(200, json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        elif self.path.startswith("/api/raw"):
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            ring = (q.get("ring", [""])[0] or "").upper()
+            record = q.get("record", [""])[0]
+            if record_raw is None:
+                body = {"error": "record_raw を読み込めません（numpy 未導入の可能性）"}
+            else:
+                body = record_raw.build_record_view(ring, record)
+            self._send(200, json.dumps(body, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8")
         else:
             self._send(404, b"not found", "text/plain")
@@ -685,7 +1230,8 @@ def main():
     except OSError as ex:
         print("ポート %d を開けませんでした（既に使用中かもしれません）: %s" % (PORT, ex))
         return
-    src = "dashboard_state.json" if os.path.isfile(STATE_FILE) else "内蔵ダミーデータ"
+    src = ("デモ（合成データ）" if os.environ.get("RECORD_RAW_DEMO")
+           else ("dashboard_state.json" if os.path.isfile(STATE_FILE) else "内蔵ダミーデータ"))
     print("圧力異常モニター（プロトタイプ）起動")
     print("  データ源: %s" % src)
     print("  ローカル:  http://localhost:%d" % PORT)

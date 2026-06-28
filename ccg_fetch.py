@@ -48,16 +48,20 @@ def fetch_history(ring, start, end, interval_sec=DEFAULT_INTERVAL,
 
     chunks = list(ip_fetch._chunks(pvs, CHUNK))
     out = {}
+    dropped = []
     for ci, chunk in enumerate(chunks, 1):
         if progress:
             sys.stderr.write("\r[%s CCG] 取得中 %d/%d チャンク..." % (ring, ci, len(chunks)))
             sys.stderr.flush()
-        text = ip_fetch._run_kblogrd(chunk, ttime, log_group, kblogrd)
-        parsed = ip_fetch.parse_kaleida(text, chunk)
+        parsed = ip_fetch._fetch_chunk(chunk, ttime, log_group, kblogrd, dropped_out=dropped)
         for pv in chunk:
             out[pv] = {"section": section_of(pv), "series": parsed.get(pv, [])}
     if progress:
         sys.stderr.write("\r[%s CCG] 取得完了 %d チャンク        \n" % (ring, len(chunks)))
+        if dropped:
+            sys.stderr.write("[%s CCG] この期間にアーカイブに無く除外した PV %d 本: %s\n"
+                             % (ring, len(dropped),
+                                ", ".join(dropped[:8]) + (" ..." if len(dropped) > 8 else "")))
         sys.stderr.flush()
     return out
 

@@ -129,6 +129,23 @@ CONFIG = {
 # アボートで走る本来の検知（make_cb が実アボート時刻を渡す経路）には適用しない。
 CHK_LAG_MIN = 10
 
+# ── イオンポンプ放電電流の judge を検知サイクルに相乗りさせる設定 ──
+#   モデル(ip_models.json)は別途 `python ip_judge.py learn …` で一度作って固定する方針
+#   （CCG の .h5 と同じ思想）。ここでは judge だけを定期実行し ip_judge_state.json を更新。
+#   モデルが無ければスキップ（操作者に learn を促すメッセージを出す）。
+IP_JUDGE_ENABLE     = True
+IP_JUDGE_EVERY_SEC  = 4 * 3600      # judge を回す間隔 [s]（CCG の定期セーフティネットと同じ 4h。
+                                    # 放電は持続性で即時性は不要。アボート連動はしない＝純粋に周期実行）
+IP_JUDGE_WINDOW_H   = 24            # 判定窓 = 直近この時間 [h]
+IP_JUDGE_INTERVAL   = 300           # judge の取得間隔 [s]
+IP_MODELS_FILE      = os.path.join(HERE, "ip_models.json")
+IP_JUDGE_STATE_FILE = os.path.join(HERE, "ip_judge_state.json")
+IP_JUDGE_COUNTS_FILE = os.path.join(HERE, "ip_judge_counts.json")  # sev3 の累積カウント（持続性）
+IP_JUDGE_HISTORY_FILE = os.path.join(HERE, "ip_judge_history.json")  # カードのカウント推移プロット用（PVごと履歴）
+IP_HISTORY_MAX      = 30            # 履歴に残す judge サイクル数（カウントプロットの横軸長）
+_ip_judge_state = {"last_run": datetime.datetime(2000, 1, 1), "warned_no_model": False}
+_ip_judge_lock = threading.Lock()
+
 # 各リングの側室リスト（.sh 名と一致。112p の self.{LER,HER}_CCG_List 相当）
 CCG_LIST = {
     "LER": ["LERD%02dCCG" % i for i in range(1, 13)],
@@ -247,6 +264,120 @@ def rebuild_json():
     print("dashboard_state.json 更新（異常 %d 件）" % len(state["anomalies"]))
 
 
+def run_ip_judge(window_h=IP_JUDGE_WINDOW_H):
+    """イオンポンプ放電電流 judge を両リング実行し ip_judge_state.json を書く。
+    モデル(ip_models.json)が無ければスキップ。各リングは独立に try（片方失敗でも続行）。
+    結果はリング結果 dict のリスト [{LER}, {HER}] として保存（state_builder が読む）。
+    """
+    if not IP_JUDGE_ENABLE:
+        return
+    import json
+    if not os.path.isfile(IP_MODELS_FILE):
+        if not _ip_judge_state["warned_no_model"]:
+            print("[ip_judge] %s が無いためスキップ。先に一度 learn してください:\n"
+                  "  python ip_judge.py learn LER <健全開始> <健全終了> --interval 300 --robust --out ip_models.json\n"
+                  "  python ip_judge.py learn HER <健全開始> <健全終了> --interval 300 --robust --out ip_models.json"
+                  % os.path.basename(IP_MODELS_FILE), flush=True)
+            _ip_judge_state["warned_no_model"] = True
+        return
+    try:
+        import ip_judge
+    except Exception as ex:
+        print("[ip_judge] import 失敗（実機で確認）: %s" % ex, flush=True)
+        return
+
+    end = datetime.datetime.now() - datetime.timedelta(minutes=CHK_LAG_MIN)
+    start = end - datetime.timedelta(hours=window_h)
+    s = start.strftime("%Y%m%d%H%M%S")
+    e = end.strftime("%Y%m%d%H%M%S")
+    results = []
+    for ring in ("LER", "HER"):
+        try:
+            res = ip_judge.judge(ring, s, e, interval_sec=IP_JUDGE_INTERVAL,
+                                 models_path=IP_MODELS_FILE)
+            results.append(res)
+            sm = res.get("summary", {})
+            print("[ip_judge] %s sev3=%s sev2=%s sev1=%s [acute=%s chronic=%s]"
+                  % (ring, sm.get("sev3"), sm.get("sev2"), sm.get("sev1"),
+                     sm.get("acute"), sm.get("chronic")), flush=True)
+        except Exception as ex:
+            print("[ip_judge] %s 判定失敗: %s" % (ring, ex), flush=True)
+
+    # sev3 の累積カウント（CCG 同様、持続して出るものだけを表示するため）。
+    # sev3 のサイクルで +1、そうでなければ -1（下限0）。ヒステリシスを持たせる。
+    try:
+        counts = json.load(open(IP_JUDGE_COUNTS_FILE, encoding="utf-8")) \
+                 if os.path.isfile(IP_JUDGE_COUNTS_FILE) else {}
+    except Exception:
+        counts = {}
+    for res in results:
+        ring = res.get("ring")
+        rc = counts.setdefault(ring, {})
+        sev3_pvs = {p["pv"] for p in res.get("pumps", []) if p.get("severity", 0) >= 3}
+        for pv in set(rc) | sev3_pvs:
+            rc[pv] = min(99, rc.get(pv, 0) + 1) if pv in sev3_pvs else max(0, rc.get(pv, 0) - 1)
+            if rc[pv] == 0:
+                del rc[pv]
+        for p in res.get("pumps", []):
+            p["count"] = rc.get(p["pv"], 0)   # 表示側の累積ゲートに使う
+    try:
+        with open(IP_JUDGE_COUNTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(counts, f, ensure_ascii=False, indent=1)
+    except Exception as ex:
+        print("[ip_judge] カウント保存失敗: %s" % ex, flush=True)
+
+    # カウント推移プロット用の履歴（PVごとに各 judge サイクルの累積カウントを追記）。
+    # 表示は state_builder 側でゲート(sev3+count)した PV のみ使う。ここでは現在カウント>0 の
+    # PV をすべて IP_HISTORY_MAX 件まで保持し、0 に戻った PV は履歴ごと忘れる（肥大化防止）。
+    try:
+        hist = json.load(open(IP_JUDGE_HISTORY_FILE, encoding="utf-8")) \
+               if os.path.isfile(IP_JUDGE_HISTORY_FILE) else {}
+    except Exception:
+        hist = {}
+    for ring in (r.get("ring") for r in results):
+        rc = counts.get(ring, {})
+        rh = hist.setdefault(ring, {})
+        for pv in set(rh) | set(rc):                  # 既存履歴 ∪ 現在カウント有り
+            seq = rh.get(pv, [])
+            seq.append(int(rc.get(pv, 0)))
+            rh[pv] = seq[-IP_HISTORY_MAX:]
+            if rc.get(pv, 0) == 0 and not any(rh[pv]):  # ずっと 0 なら忘れる
+                del rh[pv]
+    try:
+        with open(IP_JUDGE_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(hist, f, ensure_ascii=False, indent=1)
+    except Exception as ex:
+        print("[ip_judge] 履歴保存失敗: %s" % ex, flush=True)
+
+    if results:
+        try:
+            with open(IP_JUDGE_STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=1)
+            print("[ip_judge] %s を更新（窓 %s〜%s）"
+                  % (os.path.basename(IP_JUDGE_STATE_FILE), s, e), flush=True)
+        except Exception as ex:
+            print("[ip_judge] 保存失敗: %s" % ex, flush=True)
+
+
+def _maybe_run_ip_judge(force=False):
+    """前回から IP_JUDGE_EVERY_SEC 以上経っていれば judge を実行（多重起動はロックで防止）。
+    検知ループから 60s ごと等に呼ばれる想定。重い取得を別スレッドで回しても安全。"""
+    if not IP_JUDGE_ENABLE:
+        return
+    now = datetime.datetime.now()
+    due = (now - _ip_judge_state["last_run"]).total_seconds() >= IP_JUDGE_EVERY_SEC
+    if not (force or due):
+        return
+    if not _ip_judge_lock.acquire(blocking=False):
+        return   # 前回の judge がまだ走っている
+    _ip_judge_state["last_run"] = now
+    try:
+        run_ip_judge()
+        rebuild_json()   # ip_judge_state.json を dashboard_state.json に反映
+    finally:
+        _ip_judge_lock.release()
+
+
 # ── 4. 制御ループ ─────────────────────────────────────────────────────
 # v0.1 は「間隔ポーリング」。EPICS アボートトリガ版（112p の LERtriggerEvent 相当、
 # epics.camonitor でアボート信号を待つ）は次段階で追加する。
@@ -344,6 +475,8 @@ def watch_aborts(delay_min=3, debounce_min=30, interval_h=4):
                     when = now - datetime.timedelta(minutes=CHK_LAG_MIN)
                     threading.Thread(target=do_check, args=(ring, when),
                                      daemon=True).start()
+            # イオンポンプ judge を別スレッドで（CCG ループを止めない）相乗り実行
+            threading.Thread(target=_maybe_run_ip_judge, daemon=True).start()
     except KeyboardInterrupt:
         print("\n監視を停止しました")
 
@@ -354,6 +487,7 @@ def loop_interval(interval_sec=4 * 3600):
         now = _check_now()
         for ring in ("LER", "HER"):
             _run_ring(ring, now)   # リングごとに JSON も更新
+        _maybe_run_ip_judge()      # イオンポンプ judge も相乗り（間隔は IP_JUDGE_EVERY_SEC）
         time.sleep(interval_sec)
 
 
@@ -369,15 +503,19 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    # 実行モード:
-    #   --once   1回だけ検知して終了
-    #   --watch  アボートPVを監視し、アボート時＋定期に検知（常駐・実機向け推奨）
-    #   引数なし  単純な定期ループ（loop_interval）
-    if "--once" in sys.argv:
+    #   --once     1回だけ検知して終了
+    #   --ip-judge イオンポンプ judge だけ1回実行（ip_judge_state.json 更新・初回投入/テスト用）
+    #   --watch    アボートPVを監視し、アボート時＋定期に検知（常駐・実機向け推奨）
+    #   引数なし    単純な定期ループ（loop_interval）
+    if "--ip-judge" in sys.argv:
+        _maybe_run_ip_judge(force=True)
+        print("=== --ip-judge 完了 ===", flush=True)
+    elif "--once" in sys.argv:
         now = _check_now()
         t_all = time.time()
         for ring in ("LER", "HER"):
             _run_ring(ring, now)   # リングごとに JSON 更新（片方終わればすぐ表示に反映）
+        _maybe_run_ip_judge(force=True)   # イオンポンプ judge も1回（モデルがあれば）
         print("=== --once 完了（合計 %.0f 秒）dashboard_state.json を更新しました ==="
               % (time.time() - t_all), flush=True)
     elif "--watch" in sys.argv:
