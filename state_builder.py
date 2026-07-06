@@ -363,8 +363,9 @@ IP_JUDGE_FILE = os.path.join(_HERE, "ip_judge_state.json")
 IP_HISTORY_FILE = os.path.join(_HERE, "ip_judge_history.json")  # PVごとのカウント推移（カードのプロット用）
 _IP_SEV = {3: "danger", 2: "warning", 1: "watch"}
 _IP_KRANK = {"acute": 0, "unknown": 1, "chronic": 2, None: 3}
-# 表示ゲート: sev3 のみ、かつ sev3 が IP_MIN_COUNT サイクル以上続いたものだけカードに出す
-# （CCG 同様、単発の判定で大量に出さない）。0 にすると全部出る。
+# 表示ゲート: sev1/sev2 は毎回そのまま出す。sev3 だけ IP_MIN_COUNT サイクル以上続いたものに絞る
+# （単発の判定ノイズで sev3 バッジが暴れないようにするため。CCG の考え方と同じ）。
+# 以前は sev3 未満を丸ごと除外していたが、要望によりダッシュボードでも sev1/2 を見えるようにした。
 IP_MIN_SEV = 3
 IP_MIN_COUNT = 2
 
@@ -392,8 +393,11 @@ def _load_ip_judge():
         for p in res.get("pumps", []):
             sev = p.get("severity", 0)
             cnt = p.get("count", 0)
-            # 表示ゲート: sev3 以上 かつ 累積カウントが閾値以上のものだけ出す
-            if sev < IP_MIN_SEV or cnt < IP_MIN_COUNT:
+            # 表示ゲート: sev0(正常)は出さない。sev1/sev2 はそのまま通す。
+            # sev3 以上だけ累積カウントで単発ノイズを除外する。
+            if sev < 1:
+                continue
+            if sev >= IP_MIN_SEV and cnt < IP_MIN_COUNT:
                 continue
             sec = p.get("section") or "?"
             dev = p.get("deviation_dex")

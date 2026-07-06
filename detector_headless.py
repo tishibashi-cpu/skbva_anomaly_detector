@@ -130,21 +130,78 @@ CONFIG = {
 CHK_LAG_MIN = 10
 
 # ── イオンポンプ放電電流の judge を検知サイクルに相乗りさせる設定 ──
-#   モデル(ip_models.json)は別途 `python ip_judge.py learn …` で一度作って固定する方針
-#   （CCG の .h5 と同じ思想）。ここでは judge だけを定期実行し ip_judge_state.json を更新。
-#   モデルが無ければスキップ（操作者に learn を促すメッセージを出す）。
+# ── イオンポンプ放電電流の judge を検知サイクルに相乗りさせる設定 ──
+#   IP_JUDGE_ROLLING=False（既定）: 従来どおり、別途 `python ip_judge.py learn …` で一度作って
+#   固定した ip_models.json を使い続ける方式（CCG の .h5 と同じ思想）。実機確認の結果、3日程度の
+#   ローリング基準窓では放電フィットに必要な圧力レンジ変動が不足しがちで sev3 を見逃す事例が
+#   出たため、当面は固定モデルを既定とする（温度計は中央値ベースで窓長に強いため対象外）。
+#   IP_JUDGE_ROLLING=True: CCG/温度計と同じく、judge のたびに直近数日（既定 8〜5日前）から
+#   健全モデルを作り直してから比較する。モデルが無ければスキップ（操作者に learn を促すメッセージ）。
 IP_JUDGE_ENABLE     = True
+IP_JUDGE_ROLLING    = False         # 既定 False（固定モデル方式）。3日程度の基準窓では放電フィット
+                                    # に必要な圧力レンジ変動が不足しがちで sev3 の見逃しが出うるため、
+                                    # 実機確認の結果、温度計と違い IP は当面ローリング化を見送る。
+                                    # True にすれば CCG/温度計と同じローリング基準に切り替えられる。
+IP_REF_LAST_DAYS    = 5.0           # ローリング基準: 何日前まで（温度計と同じ既定）
+IP_REF_DAYS         = 3.0           # ローリング基準: 期間の長さ（既定 8〜5日前）
 IP_JUDGE_EVERY_SEC  = 4 * 3600      # judge を回す間隔 [s]（CCG の定期セーフティネットと同じ 4h。
                                     # 放電は持続性で即時性は不要。アボート連動はしない＝純粋に周期実行）
 IP_JUDGE_WINDOW_H   = 24            # 判定窓 = 直近この時間 [h]
 IP_JUDGE_INTERVAL   = 300           # judge の取得間隔 [s]
-IP_MODELS_FILE      = os.path.join(HERE, "ip_models.json")
+IP_MODELS_FILE      = os.path.join(HERE, "ip_models.json")           # 固定モデル方式用
+IP_MODELS_ROLLING_FILE = os.path.join(HERE, "ip_models_rolling.json")  # ローリング方式用（毎サイクル作り直す）
 IP_JUDGE_STATE_FILE = os.path.join(HERE, "ip_judge_state.json")
 IP_JUDGE_COUNTS_FILE = os.path.join(HERE, "ip_judge_counts.json")  # sev3 の累積カウント（持続性）
 IP_JUDGE_HISTORY_FILE = os.path.join(HERE, "ip_judge_history.json")  # カードのカウント推移プロット用（PVごと履歴）
 IP_HISTORY_MAX      = 30            # 履歴に残す judge サイクル数（カウントプロットの横軸長）
 _ip_judge_state = {"last_run": datetime.datetime(2000, 1, 1), "warned_no_model": False}
 _ip_judge_lock = threading.Lock()
+
+# ── 温度計異常検知を検知サイクルに相乗りさせる設定（temp_detector/ サブパッケージ）──
+#   温度は CCG 式ローリング基準（実行のたびに直近数日を学習）なので、事前の学習ファイルは不要。
+#   詳細は temp_detector/temp_headless.py 参照。ここでは run_once を定期的に呼ぶだけ。
+TEMP_JUDGE_ENABLE     = True
+TEMP_JUDGE_EVERY_SEC  = 4 * 3600      # judge を回す間隔 [s]（IP と同じ 4h。温度は緩慢で即時性不要）
+TEMP_JUDGE_HOURS      = 24            # 判定窓 = 直近この時間 [h]
+TEMP_JUDGE_INTERVAL   = 300           # judge の取得間隔 [s]
+TEMP_REF_LAST_DAYS    = 5.0           # ローリング基準: 何日前まで
+TEMP_REF_DAYS         = 3.0           # ローリング基準: 期間の長さ（既定 8〜5日前）
+TEMP_DIR              = os.path.join(HERE, "temp_detector")
+
+# ── 機器劣化検知（temp_equipment.py。センサ故障ではなく測定対象の熱結合の劣化）を
+#   検知サイクルに相乗りさせる設定。temp_detector/ を共用するがロジックは独立
+#   （温度計センサ判定=temp_judge とは別の判定軸）。
+#   IPと同じく固定モデル方式（運用者が明示的に learn したモデルをそのまま使い続ける）で、
+#   機器の熱結合特性は年単位でしか動かないため、判定間隔は既定で1日ごとと大幅に緩め
+#   （CCG/IP/温度計センサの4hより低頻度＝実機負荷を抑える）。learn 済みモデルが無いリングは
+#   run_periodic_judge 側で自動スキップされる（エラーにはならない）。
+EQUIPMENT_JUDGE_ENABLE     = True
+EQUIPMENT_JUDGE_EVERY_SEC  = 24 * 3600      # judge を回す間隔[s]（既定1日。機器劣化は緩慢で即時性不要）
+EQUIPMENT_JUDGE_HOURS      = 24             # 判定窓 = 直近この時間[h]
+EQUIPMENT_JUDGE_INTERVAL   = 300            # judge の取得間隔[s]
+_equipment_judge_state = {"last_run": datetime.datetime(2000, 1, 1), "warned_missing": False}
+_equipment_judge_lock = threading.Lock()
+
+# ── 冷却水流量計異常検知（flow_detector/。センサ自身の異常のみ検知。実際の流量低下は
+#   別のアラームシステムが検知するため対象外＝ユーザ確認済み）を検知サイクルに相乗りさせる設定。
+#   ビーム電流と無関係の機器で、直近窓だけを固定閾値で判定する設計（CCG式ローリング基準も
+#   固定モデル学習も不要。詳細は flow_detector/flow_judge.py 参照）なので、他の相乗りより
+#   さらに単純。判定間隔はCCG/IP/温度計センサと同じ既定4h。
+FLOW_JUDGE_ENABLE     = True
+FLOW_JUDGE_EVERY_SEC  = 4 * 3600      # judge を回す間隔[s]（CCG/IP/温度計センサと同じ4h）
+FLOW_JUDGE_HOURS      = 24            # 判定窓 = 直近この時間[h]
+FLOW_JUDGE_INTERVAL   = 30            # judge の取得間隔[s]（flow_fetch.DEFAULT_INTERVAL と同じ既定値）
+FLOW_DIR              = os.path.join(HERE, "flow_detector")
+_flow_judge_state = {"last_run": datetime.datetime(2000, 1, 1), "warned_missing": False}
+_flow_judge_lock = threading.Lock()
+
+# ── 検知サイクル内の段階分散（CCG→IP→LER温度→HER温度）──
+#   4hごとの定期チェックで CCG(LER+HER)・IP・温度計(LER・HER)が同時に kblogrd/EPICS に
+#   アクセスすると負荷が集中するため、各段階の間に待機を挟んで分散する。
+#   watch_aborts(実機推奨モード)・loop_interval(単純ループ)の両方に適用。
+STAGE_STAGGER_SEC = 5 * 60   # 各段階の間の待機[s]（既定5分。0にすれば従来どおり無待機）
+_temp_judge_state = {"last_run": datetime.datetime(2000, 1, 1), "warned_missing": False}
+_temp_judge_lock = threading.Lock()
 
 # 各リングの側室リスト（.sh 名と一致。112p の self.{LER,HER}_CCG_List 相当）
 CCG_LIST = {
@@ -264,15 +321,26 @@ def rebuild_json():
     print("dashboard_state.json 更新（異常 %d 件）" % len(state["anomalies"]))
 
 
-def run_ip_judge(window_h=IP_JUDGE_WINDOW_H):
+def run_ip_judge(window_h=IP_JUDGE_WINDOW_H, end_override=None):
     """イオンポンプ放電電流 judge を両リング実行し ip_judge_state.json を書く。
-    モデル(ip_models.json)が無ければスキップ。各リングは独立に try（片方失敗でも続行）。
-    結果はリング結果 dict のリスト [{LER}, {HER}] として保存（state_builder が読む）。
+    window_h: 判定窓の長さ[h]（既定 IP_JUDGE_WINDOW_H=24）。
+    end_override: 'YYYYMMDDhhmmss' を渡すと、判定窓の終端をそこに固定する（既定は「今」）。
+      過去の特定期間（例: 既知の放電があった日）を狙って確認したいときに使う。
+      --ip-judge --hours/--end で CLI から指定できる（main() 参照）。
+    IP_JUDGE_ROLLING=False（既定）: 固定モデル(ip_models.json)が無ければスキップ。
+    IP_JUDGE_ROLLING=True（任意）: judge のたびに直近数日（既定 8〜5日前）から
+      健全モデルを作り直してから判定する（CCG/温度計と同じローリング基準）。
+      IP_MODELS_ROLLING_FILE は削除せず、ip_judge.learn() の「low-trust のポンプは
+      前回の良いモデルを保持する」マージ機構に任せる（3日程度の短い基準窓では圧力レンジ
+      不足でtrust落ちしやすいため、削除して毎回作り直すと温度計と違いむしろ悪化する）。
+      実機確認の結果、この短さでは sev3 を見逃す事例が出たため既定では無効化している。
+    各リングは独立に try（片方失敗でも続行）。結果はリング結果 dict のリスト [{LER}, {HER}]
+    として保存（state_builder が読む）。
     """
     if not IP_JUDGE_ENABLE:
         return
     import json
-    if not os.path.isfile(IP_MODELS_FILE):
+    if not IP_JUDGE_ROLLING and not os.path.isfile(IP_MODELS_FILE):
         if not _ip_judge_state["warned_no_model"]:
             print("[ip_judge] %s が無いためスキップ。先に一度 learn してください:\n"
                   "  python ip_judge.py learn LER <健全開始> <健全終了> --interval 300 --robust --out ip_models.json\n"
@@ -286,15 +354,41 @@ def run_ip_judge(window_h=IP_JUDGE_WINDOW_H):
         print("[ip_judge] import 失敗（実機で確認）: %s" % ex, flush=True)
         return
 
-    end = datetime.datetime.now() - datetime.timedelta(minutes=CHK_LAG_MIN)
+    if end_override:
+        end = datetime.datetime.strptime(end_override, "%Y%m%d%H%M%S")
+    else:
+        end = datetime.datetime.now() - datetime.timedelta(minutes=CHK_LAG_MIN)
     start = end - datetime.timedelta(hours=window_h)
     s = start.strftime("%Y%m%d%H%M%S")
     e = end.strftime("%Y%m%d%H%M%S")
+
+    models_path = IP_MODELS_FILE
+    if IP_JUDGE_ROLLING:
+        models_path = IP_MODELS_ROLLING_FILE
+        # 前回分と自然にマージさせる（削除しない）。理由: IP のフィット信頼度(trust)は
+        # 学習窓内の圧力レンジ十分性（logP レンジ≥min_logp_range）に依存するため、3日間の
+        # 短い基準窓だと、たまたま変動の少ない期間に当たると本来良い相関のポンプまで
+        # low-trust になってしまう。ip_judge.learn() は「low-trust のポンプは前回の良い
+        # モデルを保持する」マージ機構を元から持っており、これがまさにこの状況の耐性策
+        # なので、ここで削除して無効化しない（削除すると温度計とは違いむしろ悪化する）。
+        ref_end = end - datetime.timedelta(days=IP_REF_LAST_DAYS)
+        ref_start = ref_end - datetime.timedelta(days=IP_REF_DAYS)
+        rs, re_ = ref_start.strftime("%Y%m%d%H%M%S"), ref_end.strftime("%Y%m%d%H%M%S")
+        for ring in ("LER", "HER"):
+            try:
+                ip_judge.learn(ring, rs, re_, interval_sec=IP_JUDGE_INTERVAL,
+                               out_path=models_path, robust=1)
+            except Exception as ex:
+                print("[ip_judge] %s ローリング基準学習失敗（このリングは前回相当の判定精度に低下）: %s"
+                      % (ring, ex), flush=True)
+        print("[ip_judge] ローリング基準 %s〜%s（%g日前まで×%g日）学習完了"
+              % (rs, re_, IP_REF_LAST_DAYS, IP_REF_DAYS), flush=True)
+
     results = []
     for ring in ("LER", "HER"):
         try:
             res = ip_judge.judge(ring, s, e, interval_sec=IP_JUDGE_INTERVAL,
-                                 models_path=IP_MODELS_FILE)
+                                 models_path=models_path)
             results.append(res)
             sm = res.get("summary", {})
             print("[ip_judge] %s sev3=%s sev2=%s sev1=%s [acute=%s chronic=%s]"
@@ -359,9 +453,10 @@ def run_ip_judge(window_h=IP_JUDGE_WINDOW_H):
             print("[ip_judge] 保存失敗: %s" % ex, flush=True)
 
 
-def _maybe_run_ip_judge(force=False):
+def _maybe_run_ip_judge(force=False, window_h=None, end_override=None):
     """前回から IP_JUDGE_EVERY_SEC 以上経っていれば judge を実行（多重起動はロックで防止）。
-    検知ループから 60s ごと等に呼ばれる想定。重い取得を別スレッドで回しても安全。"""
+    検知ループから 60s ごと等に呼ばれる想定。重い取得を別スレッドで回しても安全。
+    window_h/end_override: 手動確認用に判定窓を明示指定したいとき（--ip-judge 経由）。"""
     if not IP_JUDGE_ENABLE:
         return
     now = datetime.datetime.now()
@@ -372,10 +467,139 @@ def _maybe_run_ip_judge(force=False):
         return   # 前回の judge がまだ走っている
     _ip_judge_state["last_run"] = now
     try:
-        run_ip_judge()
+        run_ip_judge(window_h=window_h or IP_JUDGE_WINDOW_H, end_override=end_override)
         rebuild_json()   # ip_judge_state.json を dashboard_state.json に反映
     finally:
         _ip_judge_lock.release()
+
+
+def run_temp_judge():
+    """温度計異常検知を両リング実行し temp_detector/temp_dashboard_state.json を書く。
+    temp_detector/ は自己完結パッケージ（IP/CCG の判定コードには依存しない）なので、
+    実行時に sys.path へ足して独立に import する。失敗してもメイン検知は止めない。"""
+    if not TEMP_JUDGE_ENABLE:
+        return
+    if not os.path.isdir(TEMP_DIR):
+        if not _temp_judge_state["warned_missing"]:
+            print("[temp_judge] %s が無いためスキップ。" % TEMP_DIR, flush=True)
+            _temp_judge_state["warned_missing"] = True
+        return
+    if TEMP_DIR not in sys.path:
+        sys.path.insert(0, TEMP_DIR)
+    try:
+        import temp_headless
+    except Exception as ex:
+        print("[temp_judge] import 失敗（実機で確認）: %s" % ex, flush=True)
+        return
+    try:
+        temp_headless.run_once(hours=TEMP_JUDGE_HOURS, interval_sec=TEMP_JUDGE_INTERVAL,
+                               ref_last_days=TEMP_REF_LAST_DAYS, ref_days=TEMP_REF_DAYS,
+                               stagger_sec=STAGE_STAGGER_SEC)
+    except Exception as ex:
+        print("[temp_judge] 判定失敗: %s" % ex, flush=True)
+
+
+def _maybe_run_temp_judge(force=False):
+    """前回から TEMP_JUDGE_EVERY_SEC 以上経っていれば温度計 judge を実行（IP と同じ相乗り方式）。"""
+    if not TEMP_JUDGE_ENABLE:
+        return
+    now = datetime.datetime.now()
+    due = (now - _temp_judge_state["last_run"]).total_seconds() >= TEMP_JUDGE_EVERY_SEC
+    if not (force or due):
+        return
+    if not _temp_judge_lock.acquire(blocking=False):
+        return   # 前回の judge がまだ走っている
+    _temp_judge_state["last_run"] = now
+    try:
+        run_temp_judge()
+    finally:
+        _temp_judge_lock.release()
+
+
+def run_equipment_judge():
+    """機器劣化検知（temp_equipment.py）を学習済み全リングまとめて実行し
+    temp_detector/temp_equipment_state.json を書く。temp_judge と同じく temp_detector/ は
+    自己完結パッケージなので独立に import する。失敗してもメイン検知は止めない。
+    learn されていないリングは temp_equipment.run_periodic_judge 側で自動スキップされる。"""
+    if not EQUIPMENT_JUDGE_ENABLE:
+        return
+    if not os.path.isdir(TEMP_DIR):
+        if not _equipment_judge_state["warned_missing"]:
+            print("[equipment_judge] %s が無いためスキップ。" % TEMP_DIR, flush=True)
+            _equipment_judge_state["warned_missing"] = True
+        return
+    if TEMP_DIR not in sys.path:
+        sys.path.insert(0, TEMP_DIR)
+    try:
+        import temp_equipment
+    except Exception as ex:
+        print("[equipment_judge] import 失敗（実機で確認）: %s" % ex, flush=True)
+        return
+    try:
+        temp_equipment.run_periodic_judge(hours=EQUIPMENT_JUDGE_HOURS,
+                                          interval_sec=EQUIPMENT_JUDGE_INTERVAL)
+    except Exception as ex:
+        print("[equipment_judge] 判定失敗: %s" % ex, flush=True)
+
+
+def _maybe_run_equipment_judge(force=False):
+    """前回から EQUIPMENT_JUDGE_EVERY_SEC 以上経っていれば機器劣化 judge を実行
+    （IP/温度計センサと同じ相乗り方式。既定は1日ごと）。"""
+    if not EQUIPMENT_JUDGE_ENABLE:
+        return
+    now = datetime.datetime.now()
+    due = (now - _equipment_judge_state["last_run"]).total_seconds() >= EQUIPMENT_JUDGE_EVERY_SEC
+    if not (force or due):
+        return
+    if not _equipment_judge_lock.acquire(blocking=False):
+        return   # 前回の judge がまだ走っている
+    _equipment_judge_state["last_run"] = now
+    try:
+        run_equipment_judge()
+    finally:
+        _equipment_judge_lock.release()
+
+
+def run_flow_judge():
+    """冷却水流量計異常検知（flow_detector/）を実行し flow_detector/flow_dashboard_state.json を書く。
+    flow_detector/ は自己完結パッケージ（他の判定コードに依存しない。ビーム電流も使わない）
+    なので、実行時に sys.path へ足して独立に import する。失敗してもメイン検知は止めない。"""
+    if not FLOW_JUDGE_ENABLE:
+        return
+    if not os.path.isdir(FLOW_DIR):
+        if not _flow_judge_state["warned_missing"]:
+            print("[flow_judge] %s が無いためスキップ。" % FLOW_DIR, flush=True)
+            _flow_judge_state["warned_missing"] = True
+        return
+    if FLOW_DIR not in sys.path:
+        sys.path.insert(0, FLOW_DIR)
+    try:
+        import flow_headless
+    except Exception as ex:
+        print("[flow_judge] import 失敗（実機で確認）: %s" % ex, flush=True)
+        return
+    try:
+        flow_headless.run_once(hours=FLOW_JUDGE_HOURS, interval_sec=FLOW_JUDGE_INTERVAL)
+    except Exception as ex:
+        print("[flow_judge] 判定失敗: %s" % ex, flush=True)
+
+
+def _maybe_run_flow_judge(force=False):
+    """前回から FLOW_JUDGE_EVERY_SEC 以上経っていれば流量計 judge を実行
+    （CCG/IP/温度計センサと同じ相乗り方式。既定は4hごと）。"""
+    if not FLOW_JUDGE_ENABLE:
+        return
+    now = datetime.datetime.now()
+    due = (now - _flow_judge_state["last_run"]).total_seconds() >= FLOW_JUDGE_EVERY_SEC
+    if not (force or due):
+        return
+    if not _flow_judge_lock.acquire(blocking=False):
+        return   # 前回の judge がまだ走っている
+    _flow_judge_state["last_run"] = now
+    try:
+        run_flow_judge()
+    finally:
+        _flow_judge_lock.release()
 
 
 # ── 4. 制御ループ ─────────────────────────────────────────────────────
@@ -475,19 +699,47 @@ def watch_aborts(delay_min=3, debounce_min=30, interval_h=4):
                     when = now - datetime.timedelta(minutes=CHK_LAG_MIN)
                     threading.Thread(target=do_check, args=(ring, when),
                                      daemon=True).start()
-            # イオンポンプ judge を別スレッドで（CCG ループを止めない）相乗り実行
-            threading.Thread(target=_maybe_run_ip_judge, daemon=True).start()
+            # イオンポンプ/温度計/機器劣化/流量計 judge を STAGE_STAGGER_SEC 刻みで分散起動。
+            # Timer/Thread の生成自体にもコストがある（このループは毎分回る）ため、
+            # 実行期限が来ているものだけスレッドを立てる（期限チェックは _maybe_run_* 内でも
+            # 再度行われるので二重に安全）。
+            def _due(state, every_sec):
+                return (now - state["last_run"]).total_seconds() >= every_sec
+            stage = 1
+            for maybe_fn, state, every in (
+                    (_maybe_run_ip_judge, _ip_judge_state, IP_JUDGE_EVERY_SEC),
+                    (_maybe_run_temp_judge, _temp_judge_state, TEMP_JUDGE_EVERY_SEC),
+                    (_maybe_run_equipment_judge, _equipment_judge_state, EQUIPMENT_JUDGE_EVERY_SEC),
+                    (_maybe_run_flow_judge, _flow_judge_state, FLOW_JUDGE_EVERY_SEC)):
+                if _due(state, every):
+                    threading.Timer(STAGE_STAGGER_SEC * stage,
+                                    lambda fn=maybe_fn: threading.Thread(
+                                        target=fn, daemon=True).start()).start()
+                    stage += 1   # 期限が来ているものだけを詰めて段階分散（無駄な待ち時間を作らない）
     except KeyboardInterrupt:
         print("\n監視を停止しました")
 
 
 def loop_interval(interval_sec=4 * 3600):
-    print("detector_headless 起動（間隔 %d 秒ごとにチェック）" % interval_sec)
+    print("detector_headless 起動（間隔 %d 秒ごとにチェック、段階間 %ds 待機）"
+          % (interval_sec, STAGE_STAGGER_SEC))
     while True:
         now = _check_now()
         for ring in ("LER", "HER"):
             _run_ring(ring, now)   # リングごとに JSON も更新
+        if STAGE_STAGGER_SEC > 0:
+            time.sleep(STAGE_STAGGER_SEC)   # CCG → IP の間の負荷分散
         _maybe_run_ip_judge()      # イオンポンプ judge も相乗り（間隔は IP_JUDGE_EVERY_SEC）
+        if STAGE_STAGGER_SEC > 0:
+            time.sleep(STAGE_STAGGER_SEC)   # IP → 温度計(LER) の間の負荷分散
+        _maybe_run_temp_judge()    # 温度計 judge も相乗り（間隔は TEMP_JUDGE_EVERY_SEC。
+                                   # LER→HER の間も内部で STAGE_STAGGER_SEC 待機する）
+        if STAGE_STAGGER_SEC > 0:
+            time.sleep(STAGE_STAGGER_SEC)   # 温度計 → 機器劣化 の間の負荷分散
+        _maybe_run_equipment_judge()  # 機器劣化 judge も相乗り（間隔は EQUIPMENT_JUDGE_EVERY_SEC、既定1日）
+        if STAGE_STAGGER_SEC > 0:
+            time.sleep(STAGE_STAGGER_SEC)   # 機器劣化 → 流量計 の間の負荷分散
+        _maybe_run_flow_judge()    # 流量計 judge も相乗り（間隔は FLOW_JUDGE_EVERY_SEC、既定4h）
         time.sleep(interval_sec)
 
 
@@ -505,17 +757,57 @@ if __name__ == "__main__":
 
     #   --once     1回だけ検知して終了
     #   --ip-judge イオンポンプ judge だけ1回実行（ip_judge_state.json 更新・初回投入/テスト用）
+    #              --hours N: 判定窓の長さ[h]（既定 IP_JUDGE_WINDOW_H=24）
+    #              --end YYYYMMDDhhmmss: 判定窓の終端を指定（既定は「今」。過去の期間を狙う用）
+    #              例: python detector_headless.py --ip-judge --hours 72
+    #                  python detector_headless.py --ip-judge --end 20260620000000 --hours 48
+    #   --temp-judge 温度計 judge だけ1回実行（temp_dashboard_state.json 更新・初回投入/テスト用）
+    #   --equipment-judge 機器劣化 judge だけ1回実行（temp_equipment_state.json 更新・初回投入/テスト用。
+    #              learn 済みモデルが無いリングは自動スキップ。手動テストなら
+    #              temp_equipment.py judge-all でも同じことができる）
+    #   --flow-judge 冷却水流量計 judge だけ1回実行（flow_dashboard_state.json 更新・初回投入/テスト用。
+    #              ビーム電流と無関係・直近窓だけの判定なので learn 等の事前準備は不要）
     #   --watch    アボートPVを監視し、アボート時＋定期に検知（常駐・実機向け推奨）
     #   引数なし    単純な定期ループ（loop_interval）
     if "--ip-judge" in sys.argv:
-        _maybe_run_ip_judge(force=True)
-        print("=== --ip-judge 完了 ===", flush=True)
+        _wh = None
+        if "--hours" in sys.argv:
+            i = sys.argv.index("--hours")
+            if i + 1 < len(sys.argv):
+                try:
+                    _wh = float(sys.argv[i + 1])
+                except ValueError:
+                    print("エラー: --hours の値が不正です: %r" % sys.argv[i + 1]); sys.exit(1)
+        _end = None
+        if "--end" in sys.argv:
+            i = sys.argv.index("--end")
+            if i + 1 < len(sys.argv):
+                _end = sys.argv[i + 1]
+                try:
+                    datetime.datetime.strptime(_end, "%Y%m%d%H%M%S")
+                except ValueError:
+                    print("エラー: --end は YYYYMMDDhhmmss の14桁で指定してください: %r" % _end); sys.exit(1)
+        _maybe_run_ip_judge(force=True, window_h=_wh, end_override=_end)
+        print("=== --ip-judge 完了（窓 %sh, 終端 %s）==="
+              % (_wh or IP_JUDGE_WINDOW_H, _end or "現在"), flush=True)
+    elif "--temp-judge" in sys.argv:
+        _maybe_run_temp_judge(force=True)
+        print("=== --temp-judge 完了 ===", flush=True)
+    elif "--equipment-judge" in sys.argv:
+        _maybe_run_equipment_judge(force=True)
+        print("=== --equipment-judge 完了 ===", flush=True)
+    elif "--flow-judge" in sys.argv:
+        _maybe_run_flow_judge(force=True)
+        print("=== --flow-judge 完了 ===", flush=True)
     elif "--once" in sys.argv:
         now = _check_now()
         t_all = time.time()
         for ring in ("LER", "HER"):
             _run_ring(ring, now)   # リングごとに JSON 更新（片方終わればすぐ表示に反映）
-        _maybe_run_ip_judge(force=True)   # イオンポンプ judge も1回（モデルがあれば）
+        _maybe_run_ip_judge(force=True)        # イオンポンプ judge も1回（モデルがあれば）
+        _maybe_run_temp_judge(force=True)      # 温度計 judge も1回
+        _maybe_run_equipment_judge(force=True) # 機器劣化 judge も1回（learn済みリングがあれば）
+        _maybe_run_flow_judge(force=True)      # 流量計 judge も1回
         print("=== --once 完了（合計 %.0f 秒）dashboard_state.json を更新しました ==="
               % (time.time() - t_all), flush=True)
     elif "--watch" in sys.argv:

@@ -17,7 +17,7 @@ SuperKEKB 圧力異常検知 — 監視ダッシュボード（プロトタイ�
 
 import json
 import os
-import math
+import sys
 import random
 import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,6 +52,35 @@ PORT = 18050
 # CWD に依存しないよう __file__ 基準で解決する。
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_state.json")
 LABEL_QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "label_queue.jsonl")
+# 温度計異常検知（temp_detector/ サブパッケージ、または環境変数で明示指定）が生成する状態ファイル。
+# 新レイアウト: skbva_anomaly_detector/temp_detector/temp_dashboard_state.json（既定）。
+# 旧レイアウト（temp_detector が兄弟ディレクトリ skbva_temp_detector/ だった配置）にも
+# 後方互換でフォールバックする。環境変数が最優先。
+_DASH_DIR = os.path.dirname(os.path.abspath(__file__))
+_TEMP_STATE_CANDIDATES = [
+    os.path.join(_DASH_DIR, "temp_detector", "temp_dashboard_state.json"),          # 新レイアウト
+    os.path.join(os.path.dirname(_DASH_DIR), "skbva_temp_detector", "temp_dashboard_state.json"),  # 旧レイアウト
+]
+TEMP_STATE_FILE = os.environ.get("TEMP_DASHBOARD_STATE") or next(
+    (p for p in _TEMP_STATE_CANDIDATES if os.path.isfile(p)), _TEMP_STATE_CANDIDATES[0])
+
+# 機器劣化検知（temp_equipment.py の run_periodic_judge が書く。センサ故障ではなく測定対象
+# 機器側の熱結合劣化を見る、温度計異常検知とは別の判定軸）。パス解決の考え方はTEMP_STATE_FILEと同じ。
+_EQUIPMENT_STATE_CANDIDATES = [
+    os.path.join(_DASH_DIR, "temp_detector", "temp_equipment_state.json"),
+    os.path.join(os.path.dirname(_DASH_DIR), "skbva_temp_detector", "temp_equipment_state.json"),
+]
+EQUIPMENT_STATE_FILE = os.environ.get("EQUIPMENT_DASHBOARD_STATE") or next(
+    (p for p in _EQUIPMENT_STATE_CANDIDATES if os.path.isfile(p)), _EQUIPMENT_STATE_CANDIDATES[0])
+
+# 冷却水流量計異常検知（flow_detector/flow_headless.py が書く。ビーム電流と無関係の機器で、
+# センサ自身の異常だけを見る判定軸。リング概念が無いので rings ラッパーは持たずフラットなJSON）。
+_FLOW_STATE_CANDIDATES = [
+    os.path.join(_DASH_DIR, "flow_detector", "flow_dashboard_state.json"),
+    os.path.join(os.path.dirname(_DASH_DIR), "skbva_flow_detector", "flow_dashboard_state.json"),
+]
+FLOW_STATE_FILE = os.environ.get("FLOW_DASHBOARD_STATE") or next(
+    (p for p in _FLOW_STATE_CANDIDATES if os.path.isfile(p)), _FLOW_STATE_CANDIDATES[0])
 
 # ----------------------------------------------------------------------------
 # ダミーデータ生成（実運用 JSON と同じスキーマ）
@@ -161,6 +190,139 @@ def make_dummy_state():
         "ip_sections": ip_sections,
     }
 
+def _dummy_ts_plot(base, amp, n=120, beam=True, seed=1):
+    """デモ用の間引き時系列（temp/flow の plot と同じ形）を合成する。"""
+    import math as _m
+    import random as _rnd
+    r = _rnd.Random(seed)
+    t = ["07/04/2026 %02d:%02d:00" % ((i * 12) // 60, (i * 12) % 60) for i in range(n)]
+    vals = [base + amp * _m.sin(i / 14.0) + r.gauss(0, abs(amp) * 0.08 + 0.05) for i in range(n)]
+    bm = [800 - 2.2 * i + r.gauss(0, 6) for i in range(n)] if beam else None
+    return t, vals, bm
+
+def make_dummy_temp_state():
+    """温度計タブのデモ用ダミー（temp_headless.py が書く temp_dashboard_state.json と同じ形）。"""
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ler_anoms = [
+        {"pv": "VALTMP:D01M095:QLC3LE:BL", "ring": "LER", "section": "D01", "tag": "QLC3LE", "suffix": "BL",
+         "severity": 3, "reason": "range_low_short_suspect", "n_pts": 288,
+         "t_med": -25.6, "t_min": -30.0, "t_max": -22.2, "frac_low": 1.0, "frac_hot": None,
+         "r_beam": None, "n_events": 1, "has_model": True},
+        {"pv": "VALTMP:D02_221:QKARE:BL", "ring": "LER", "section": "D02", "tag": "QKARE", "suffix": "BL",
+         "severity": 2, "reason": "intermittent_excursion", "n_pts": 288,
+         "t_med": 14.9, "t_min": -6.8, "t_max": 18.2, "frac_low": None, "frac_hot": None,
+         "r_beam": None, "n_events": 4, "has_model": True},
+    ]
+    her_anoms = [
+        {"pv": "VAHTMP:D01M106:QLY2LE_2:BL", "ring": "HER", "section": "D01", "tag": "QLY2LE_2", "suffix": "BL",
+         "severity": 3, "reason": "range_high_noheat_suspect", "n_pts": 288,
+         "t_med": 39.1, "t_min": 36.5, "t_max": 39.6, "frac_low": None, "frac_hot": 1.0,
+         "r_beam": None, "n_events": None, "has_model": True},
+        {"pv": "VAHTMP:D12_136:QD1E_4:BL", "ring": "HER", "section": "D12", "tag": "QD1E_4", "suffix": "BL",
+         "severity": 2, "reason": "beam_anticorrelated", "n_pts": 288,
+         "t_med": 62.0, "t_min": 55.4, "t_max": 82.8, "frac_low": None, "frac_hot": None,
+         "r_beam": -0.71, "n_events": None, "has_model": True},
+        {"pv": "VAHTMP:D09_119:B2E_42:BL", "ring": "HER", "section": "D09", "tag": "B2E_42", "suffix": "BL",
+         "severity": 2, "reason": "glitch", "n_pts": 288,
+         "t_med": 35.8, "t_min": 23.4, "t_max": 44.8, "frac_low": None, "frac_hot": None,
+         "r_beam": None, "n_events": None, "has_model": True},
+    ]
+    def ring_block(anoms, n_judged):
+        for k, a in enumerate(anoms):   # 各異常にクリック展開プロット用の合成時系列を付ける
+            t, vals, bm = _dummy_ts_plot(a["t_med"], (a["t_max"] - a["t_min"]) / 3.0, seed=k + 1)
+            a["plot"] = {"t": t, "temp": vals, "beam": bm}
+        return {"window": {"start": "20260701000000", "end": "20260702000000", "hours": 24, "interval_sec": 300},
+                "baseline": {"start": "20260624000000", "end": "20260627000000", "last_days": 5.0, "days": 3.0},
+                "stats": {"n_judged": n_judged, "n_quick_sev3": sum(1 for a in anoms if a["severity"] >= 3),
+                          "have_beam": True},
+                "n_anomalies": len(anoms), "anomalies": anoms}
+    return {"generated_at": now, "rings": {"LER": ring_block(ler_anoms, 1547), "HER": ring_block(her_anoms, 1258)}}
+
+def make_dummy_equipment_state():
+    """機器劣化検知タブのデモ用ダミー（temp_equipment.py の run_periodic_judge が書く
+    temp_equipment_state.json と同じ形。linear/hom 両モデルの表示形式を1件ずつ含める）。"""
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ler_anoms = [
+        {"pv": "VALTMP:D10_139:QD3E_11:BL", "ring": "LER", "section": "D10", "tag": "QD3E_11",
+         "model": "linear", "severity": 3, "reason": "heating_gain_increase_severe",
+         "ratio": 1.68, "delta": 0.0030, "delta_a": 2.1,
+         "b_ref": 0.00425, "a_ref": 19.6, "now": {"b": 0.00715, "a": 21.7, "r": 0.91, "n": 812, "trust": True}},
+        {"pv": "VALTMP:D04_221:QKARE:BL", "ring": "LER", "section": "D04", "tag": "QKARE",
+         "model": "linear", "severity": 2, "reason": "heating_gain_increase",
+         "ratio": 1.27, "delta": 0.0011, "delta_a": 0.4,
+         "b_ref": 0.00410, "a_ref": 18.2, "now": {"b": 0.00521, "a": 18.6, "r": 0.88, "n": 790, "trust": True}},
+    ]
+    ir_anoms = [
+        {"pv": "FB_MOVE:D01:QC1L:BWS:TEMP", "ring": "IR", "section": "D01", "tag": "QC1L",
+         "model": "hom", "severity": 3, "reason": "heating_gain_increase_severe",
+         "ratio": 1.62, "delta": 2.63, "delta_a": -0.3,
+         "eval_i": 980.0, "eval_nb": 1576.0, "dT_ref": 4.25, "dT_now": 6.88,
+         "r2_ref": 0.97, "now": {"w": [20.1, 0.00286, 5e-06], "r2": 0.98, "n": 640, "trust": True}},
+    ]
+    def _mk_equip_plot(a):
+        """散布＋フィット曲線の合成プロット（linear/hom両形式）。基準/調査の傾き差が見えるように作る。"""
+        import random as _rnd
+        r = _rnd.Random(hash(a["pv"]) & 0xffff)
+        ii = [50 + k * (1400 / 79.0) for k in range(80)]
+        if a["model"] == "hom":
+            w_ref = [20.1, 0.00286, 5e-06 / a["ratio"]]
+            w_now = a["now"]["w"]
+            nb = a["eval_nb"]
+            f = lambda w, i: w[0] + w[1] * i + w[2] * (i * i / nb) ** 2
+            ref = {"i": ii, "t": [f(w_ref, i) + r.gauss(0, 0.15) for i in ii]}
+            nowp = {"i": ii, "t": [f(w_now, i) + r.gauss(0, 0.15) for i in ii]}
+            return {"ref": ref, "now": nowp,
+                    "ref_fit": {"i": ii, "t": [f(w_ref, i) for i in ii]},
+                    "now_fit": {"i": ii, "t": [f(w_now, i) for i in ii]}}
+        else:
+            f = lambda a_, b_, i: a_ + b_ * i
+            nowp = {"i": ii, "t": [f(a["now"]["a"], a["now"]["b"], i) + r.gauss(0, 0.3) for i in ii]}
+            return {"ref": None, "now": nowp,
+                    "ref_fit": {"i": [ii[0], ii[-1]],
+                                "t": [f(a["a_ref"], a["b_ref"], ii[0]), f(a["a_ref"], a["b_ref"], ii[-1])]},
+                    "now_fit": {"i": [ii[0], ii[-1]],
+                                "t": [f(a["now"]["a"], a["now"]["b"], ii[0]), f(a["now"]["a"], a["now"]["b"], ii[-1])]}}
+    def ring_block(anoms, n_judged):
+        for a in anoms:
+            a["plot"] = _mk_equip_plot(a)
+        return {"window": {"start": "20260703000000", "end": "20260704000000", "hours": 24, "interval_sec": 300},
+                "stats": {"n_judged": n_judged, "n_anomalies_sev3": sum(1 for a in anoms if a["severity"] >= 3)},
+                "n_anomalies": len(anoms), "anomalies": anoms, "section_warnings": []}
+    return {"generated_at": now, "rings": {
+        "LER": ring_block(ler_anoms, 1550),
+        "HER": {"skipped": True, "reason": "not_learned"},
+        "IR": ring_block(ir_anoms, 42),
+    }}
+
+def make_dummy_flow_state():
+    """流量計異常検知タブのデモ用ダミー（flow_headless.py が書く flow_dashboard_state.json と
+    同じ形。実際に確認された故障パターン3種＝不安定化/校正基準比の低下/値の固着を1件ずつ含める）。
+    流量計はリング概念を持たないため、他タブと違い rings ラッパーが無いフラットな構造。"""
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    anomalies = [
+        {"pv": "VA_FLS:D10_02_010:RATE", "section": "D10", "tag": "010", "sensor_id": "D10_02",
+         "severity": 3, "reason": "frozen_low", "median_pct": 0.29, "cv_pct": 3.1, "n": 2880, "n_valid": 2880,
+         "layers": {"frozen": {"range": 0.03, "is_frozen": True}}},
+        {"pv": "VA_FLS:D05_14_018:RATE", "section": "D05", "tag": "018", "sensor_id": "D05_14",
+         "severity": 2, "reason": "excess_noise", "median_pct": 99.6, "cv_pct": 12.8, "n": 2880, "n_valid": 2880,
+         "layers": {"excess_noise": {"cv_pct": 12.8}}},
+        {"pv": "VA_FLS:D04_15_084:RATE", "section": "D04", "tag": "084", "sensor_id": "D04_15",
+         "severity": 1, "reason": "excess_noise_watch", "median_pct": 74.9, "cv_pct": 5.2, "n": 2880, "n_valid": 2880,
+         "layers": {"excess_noise": {"cv_pct": 5.2}}},
+    ]
+    # 各異常に、その故障パターンらしい合成時系列を付ける（クリック展開プロット用）
+    import random as _rnd
+    _r = _rnd.Random(7)
+    _t = ["07/04/2026 %02d:%02d:00" % ((k * 12) // 60, (k * 12) % 60) for k in range(120)]
+    anomalies[0]["plot"] = {"t": _t, "v": [0.29 + _r.gauss(0, 0.01) for _ in range(120)]}          # 固着(近ゼロ)
+    anomalies[1]["plot"] = {"t": _t, "v": [99.6 + _r.gauss(0, 12.8) for _ in range(120)]}          # 不安定化
+    anomalies[2]["plot"] = {"t": _t, "v": [74.9 + _r.gauss(0, 3.9) for _ in range(120)]}           # 軽度不安定
+    return {"generated_at": now,
+            "window": {"start": "20260703000000", "end": "20260704000000", "hours": 24, "interval_sec": 30},
+            "stats": {"n_judged": 678, "n_insufficient": 0, "n_anomalies_sev3": 1,
+                     "n_anomalies_sev2": 1, "n_anomalies_sev1": 1},
+            "n_anomalies": len(anomalies), "anomalies": anomalies}
+
 def load_state():
     # デモモードでは dashboard_state.json があっても内蔵ダミーを使う
     # （ダミー series には abnormal が入っており、サイドバーのトレンドが正しく描ける）。
@@ -173,6 +335,44 @@ def load_state():
         except Exception as e:
             return {"error": "state file read failed: %s" % e}
     return make_dummy_state()
+
+def load_temp_state():
+    if os.environ.get("RECORD_RAW_DEMO"):
+        return make_dummy_temp_state()
+    if os.path.isfile(TEMP_STATE_FILE):
+        try:
+            with open(TEMP_STATE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            return {"error": "temp state file read failed: %s" % e}
+    return {"rings": {}, "error": "%s が見つかりません。temp_headless.py を実行してください。"
+            % os.path.basename(TEMP_STATE_FILE)}
+
+def load_equipment_state():
+    if os.environ.get("RECORD_RAW_DEMO"):
+        return make_dummy_equipment_state()
+    if os.path.isfile(EQUIPMENT_STATE_FILE):
+        try:
+            with open(EQUIPMENT_STATE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            return {"error": "equipment state file read failed: %s" % e}
+    return {"rings": {}, "error": "%s が見つかりません。detector_headless.py --equipment-judge "
+            "（または temp_equipment.py judge-all）を実行してください。"
+            % os.path.basename(EQUIPMENT_STATE_FILE)}
+
+def load_flow_state():
+    if os.environ.get("RECORD_RAW_DEMO"):
+        return make_dummy_flow_state()
+    if os.path.isfile(FLOW_STATE_FILE):
+        try:
+            with open(FLOW_STATE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            return {"error": "flow state file read failed: %s" % e}
+    return {"anomalies": [], "error": "%s が見つかりません。detector_headless.py --flow-judge "
+            "（または flow_detector/flow_headless.py --once）を実行してください。"
+            % os.path.basename(FLOW_STATE_FILE)}
 
 # ----------------------------------------------------------------------------
 # フロントエンド（HTML/CSS/JS を 1 つにまとめて配信）
@@ -245,6 +445,7 @@ PAGE = r"""<!DOCTYPE html>
   .ipcard:hover { background: var(--surface2); }
   .ipcard.danger { border-left-color: var(--danger); }
   .ipcard.warning { border-left-color: var(--warning); }
+  .ipcard.watch { border-left-color: var(--faint); }
   .ipcard.sel { background: var(--surface2); border-color: var(--accent); }
   .sevtag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
             min-width: 38px; text-align: center; }
@@ -340,6 +541,32 @@ PAGE = r"""<!DOCTYPE html>
   .ippv-name { flex: 1; font-size: 11.5px; font-family: ui-monospace, monospace; color: var(--text); }
   .ippv-val { width: 92px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums;
               color: var(--muted); }
+  .tabbar { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
+  .tabbtn { appearance: none; background: transparent; border: none; color: var(--muted);
+            font: inherit; font-size: 13.5px; font-weight: 500; padding: 9px 16px 10px;
+            cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabbtn:hover { color: var(--text); }
+  .tabbtn.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tabbtn .badge { display: inline-block; margin-left: 7px; padding: 1px 7px; border-radius: 8px;
+                    font-size: 11px; background: var(--surface2); color: var(--muted); }
+  .tabbtn .badge.hot { background: var(--danger-bg); color: var(--danger-fg); }
+  .tabpanel { display: none; }
+  .tabpanel.active { display: block; }
+  .temp-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .temp-table th { text-align: left; color: var(--muted); font-weight: 500; font-size: 13px;
+                    padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  .temp-table td { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .temp-table tr:hover td { background: var(--surface2); }
+  .sev-badge { display: inline-block; min-width: 18px; text-align: center; padding: 2px 8px;
+               border-radius: 5px; font-weight: 600; font-size: 13px; }
+  .sev-badge.sev3 { background: var(--danger-bg); color: var(--danger-fg); }
+  .sev-badge.sev2 { background: var(--warning-bg); color: var(--warning-fg); }
+  .sev-badge.sev1 { background: var(--surface2); color: var(--muted); }
+  .temp-ring-title { font-weight: 600; margin: 18px 0 8px; color: var(--text); font-size: 15px; }
+  .temp-ring-title:first-child { margin-top: 0; }
+  .archiver-banner { background: var(--warning-bg); color: var(--warning-fg);
+                      border: 1px solid var(--warning); border-radius: 8px;
+                      padding: 11px 15px; margin: 0 0 14px; font-size: 13.5px; }
 </style>
 </head>
 <body>
@@ -359,24 +586,61 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="cards" id="summary"></div>
+  <div class="tabbar" id="tabbar">
+    <button class="tabbtn active" data-tab="ccg" onclick="switchTab('ccg')">圧力異常検知<span class="badge" id="tab-badge-ccg"></span></button>
+    <button class="tabbtn" data-tab="ip" onclick="switchTab('ip')">イオンポンプ異常放電<span class="badge" id="tab-badge-ip"></span></button>
+    <button class="tabbtn" data-tab="temp" onclick="switchTab('temp')">温度計異常検知<span class="badge" id="tab-badge-temp"></span></button>
+    <button class="tabbtn" data-tab="equip" onclick="switchTab('equip')">機器劣化検知<span class="badge" id="tab-badge-equip"></span></button>
+    <button class="tabbtn" data-tab="flow" onclick="switchTab('flow')">流量計異常検知<span class="badge" id="tab-badge-flow"></span></button>
+  </div>
 
-  <div class="section-title">検知された異常 — カウントの多い順</div>
-  <div class="alist" id="alist"></div>
-  <div id="detail-host"></div>
+  <div class="tabpanel active" id="tab-ccg">
+    <div class="cards" id="summary"></div>
 
-  <div id="ip-anomalies"></div>
-  <div id="ip-detail-host"></div>
+    <div class="section-title">検知された異常 — カウントの多い順</div>
+    <div class="alist" id="alist"></div>
+    <div id="detail-host"></div>
+  </div>
 
-  <div id="ionpumps"></div>
+  <div class="tabpanel" id="tab-ip">
+    <div id="ip-anomalies"></div>
+    <div id="ip-detail-host"></div>
+
+    <div id="ionpumps"></div>
+  </div>
+
+  <div class="tabpanel" id="tab-temp">
+    <div id="temp-anomalies"></div>
+  </div>
+
+  <div class="tabpanel" id="tab-equip">
+    <div id="equip-anomalies"></div>
+  </div>
+
+  <div class="tabpanel" id="tab-flow">
+    <div id="flow-anomalies"></div>
+  </div>
 
   <div class="footnote" id="footnote"></div>
 </div>
 
 <script>
 let STATE = null;
+let TEMP_STATE = null;
+let EQUIP_STATE = null;
+let FLOW_STATE = null;
 let SELECTED = null;
+let TEMP_SEL = null;         // 展開中の温度異常 {ring, pv} または null
+let EQUIP_SEL = null;        // 展開中の機器劣化異常 {ring, pv} または null
+let FLOW_SEL = null;         // 展開中の流量計異常 pv または null（リング概念が無いのでキーはpvのみ）
+let CUR_TAB = "ccg";
 let DETAIL_RENDERED = null;   // 現在 詳細ビューに描画済みのレコード id（不要な再描画防止）
+
+function switchTab(name) {
+  CUR_TAB = name;
+  document.querySelectorAll(".tabbtn").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".tabpanel").forEach(p => p.classList.toggle("active", p.id === "tab-" + name));
+}
 
 function fmtPres(v) {
   if (!isFinite(v) || v <= 0) return "0";
@@ -801,11 +1065,10 @@ const IP_KIND_JP = {acute: "急性", chronic: "慢性", unknown: "不明"};
 
 function renderIPAnomalies(s) {
   const host = document.getElementById("ip-anomalies");
-  // 表示ゲート: sev3 のみ（sev1/2 はカードに出さない。本番は state_builder でも同ゲート）。
-  const list = (s.ion_pump_anomalies || []).filter(a => (a.severity_n || 0) >= 3);
+  const list = (s.ion_pump_anomalies || []).slice().sort((a, b) => (b.severity_n || 0) - (a.severity_n || 0));
   if (!list.length) { host.innerHTML = ""; return; }
   let html = '<div class="section-title ip-section"><span class="ip-title">イオンポンプ 異常モニター</span>' +
-             '（sev3 が継続したもののみ・急性を上に表示）</div>';
+             '（sev3=急性/継続、sev2=要観察、sev1=軽微。severity 降順で表示）</div>';
   list.forEach(a => {
     const sev = a.severity;
     const dev = (a.deviation_dex != null)
@@ -1088,6 +1351,447 @@ function _renderIonPumps_disabled(s) {
   host.innerHTML = html;
 }
 
+// 温度計異常の理由コード → 日本語（temp_batch.py の REASON_JA と対応）
+const TEMP_REASON_JP = {
+  range_high_open_suspect: "断線疑い(非現実高温)",
+  range_high_noheat_suspect: "無ビーム高温(near-open/高抵抗)",
+  range_low_short_suspect: "短絡疑い(低温/サブ常温)",
+  noise_and_glitch: "断線間近(ノイズ+グリッチ)",
+  beam_anticorrelated: "ビーム反相関",
+  intermittent_excursion: "間欠逸脱(稀な極端値)",
+  noise_increase: "ノイズ増大",
+  glitch: "グリッチ頻発",
+  stuck: "張り付き",
+  range_watch: "レンジ接近/軽度",
+  pair_deviation_high: "ペア乖離(大)",
+  pair_deviation_watch: "ペア乖離(軽)",
+  normal: "正常",
+};
+
+function fmtT(v) { return (v == null || !isFinite(v)) ? "—" : v.toFixed(1); }
+
+function renderTempAnomalies(s) {
+  const host = document.getElementById("temp-anomalies");
+  const badge = document.getElementById("tab-badge-temp");
+  // s.error: 状態ファイルが無い/読めない（temp_headless.py 未実行など）。rings が空 {} でも
+  // JSでは truthy なので、error を先に明示チェックしないと案内文が出ずタブが真っ白になる。
+  if (!s || !s.rings || (s.error && !Object.keys(s.rings || {}).length)) {
+    host.innerHTML = '<div class="footnote">' +
+      ((s && s.error) || '温度計データがありません（temp_headless.py が未実行の可能性）') + '</div>';
+    if (badge) { badge.textContent = ""; badge.classList.remove("hot"); }
+    return;
+  }
+  let totalSev3 = 0, totalAnom = 0, html = "", anyArchiverStopped = false;
+  ["LER", "HER"].forEach(ring => {
+    const r = s.rings[ring];
+    if (!r) return;
+    if (r.error) {
+      html += '<div class="temp-ring-title">' + ring + '</div><div class="footnote">判定失敗: ' + r.error + '</div>';
+      return;
+    }
+    if (r.archiver_stopped) {
+      anyArchiverStopped = true;
+      html += '<div class="archiver-banner">⚠ ' + ring + ': 現在、アーカイバ(kblog)が温度計のデータ取得を'
+            + '停止中です。PVリスト全' + ((r.stats && r.stats.n_total) || "?") + '本で有効なデータが取得'
+            + 'できませんでした（判定は行われていません。センサの異常ではありません）。</div>';
+    }
+    const anomalies = r.anomalies || [];
+    const nAnom = (r.n_anomalies != null) ? r.n_anomalies : anomalies.length;  // JSONの総数（表は上位topのみ）
+    totalAnom += nAnom;
+    totalSev3 += anomalies.filter(a => a.severity >= 3).length;
+    const stats = r.stats || {};
+    html += '<div class="temp-ring-title">' + ring + ' — 判定 ' + (stats.n_judged || 0) + ' 本 / 異常 ' +
+            nAnom + ' 本' + (nAnom > anomalies.length ? '（表は上位' + anomalies.length + '本）' : '') +
+            (r.baseline ? '　基準: ' + r.baseline.start + '〜' + r.baseline.end : '') + '</div>';
+    if (!anomalies.length) { html += '<div class="footnote">異常なし</div>'; return; }
+    html += '<table class="temp-table"><thead><tr>' +
+            '<th>sev</th><th>PV</th><th>種別</th><th>t_med</th><th>t_min</th><th>t_max</th><th>理由</th>' +
+            '</tr></thead><tbody>';
+    anomalies.forEach(a => {
+      const rid = ring + ":" + a.pv;
+      html += '<tr onclick="toggleTemp(\'' + rid + '\')" style="cursor:pointer">' +
+        '<td><span class="sev-badge sev' + a.severity + '">' + a.severity + '</span></td>' +
+        '<td>' + a.pv.split(":").slice(1).join(":") + '</td>' +
+        '<td>' + (a.suffix || "-") + '</td>' +
+        '<td>' + fmtT(a.t_med) + '</td><td>' + fmtT(a.t_min) + '</td><td>' + fmtT(a.t_max) + '</td>' +
+        '<td>' + (TEMP_REASON_JP[a.reason] || a.reason) + '</td></tr>';
+      if (TEMP_SEL === rid) {
+        html += '<tr><td colspan="7" style="background:var(--surface2)">' +
+          '<div class="footnote">section=' + a.section + ' tag=' + a.tag +
+          ' n_pts=' + a.n_pts +
+          (a.frac_low != null ? '　S.frac_low=' + a.frac_low.toFixed(2) : '') +
+          (a.frac_hot != null ? '　O.frac_hot=' + a.frac_hot.toFixed(2) : '') +
+          (a.r_beam != null ? '　B.r_beam=' + a.r_beam.toFixed(2) : '') +
+          (a.n_events != null ? '　I.events=' + a.n_events : '') +
+          '　model=' + (a.has_model ? "有" : "無") + '</div>' +
+          detailPlotBox('温度＆ビーム電流 vs 時刻（判定窓）　' +
+                        '<span style="color:#e2574a">━温度[℃]</span> ' +
+                        '<span style="color:#5dcaa5">┄ビーム電流[mA]</span>',
+                        a.plot ? tempTimePlot(a.plot) : '', !!a.plot) +
+          '</td></tr>';
+      }
+    });
+    html += '</tbody></table>';
+  });
+  host.innerHTML = html;
+  if (badge) {
+    if (anyArchiverStopped) {
+      badge.textContent = "停止中";
+      badge.classList.remove("hot");
+    } else {
+      badge.textContent = totalAnom ? (totalSev3 + "/" + totalAnom) : "";
+      badge.classList.toggle("hot", totalSev3 > 0);
+    }
+  }
+}
+
+function toggleTemp(rid) {
+  TEMP_SEL = (TEMP_SEL === rid) ? null : rid;
+  renderTempAnomalies(TEMP_STATE);
+}
+
+// 機器劣化検知の理由コード → 日本語（temp_equipment.py の compare_periods/compare_periods_hom と対応。
+// linear/hom どちらのモデルも同じ理由コード体系を使う）
+const EQUIP_REASON_JP = {
+  insufficient_data: "判定不能(データ不足)",
+  normal: "正常",
+  heating_gain_increase_watch: "発熱増加(軽度・要注視)",
+  heating_gain_increase: "発熱増加(中)",
+  heating_gain_increase_severe: "発熱増加(重度)",
+};
+
+function renderEquipmentAnomalies(s) {
+  const host = document.getElementById("equip-anomalies");
+  const badge = document.getElementById("tab-badge-equip");
+  // s.error: 状態ファイルが無い/読めない場合の案内（rings が空 {} でも truthy なため明示チェック）
+  if (!s || !s.rings || (s.error && !Object.keys(s.rings || {}).length)) {
+    host.innerHTML = '<div class="footnote">' +
+      ((s && s.error) || '機器劣化データがありません（temp_equipment.py の learn/judge が未実行の可能性）') + '</div>';
+    if (badge) { badge.textContent = ""; badge.classList.remove("hot"); }
+    return;
+  }
+  let totalSev3 = 0, totalAnom = 0, html = "", anyArchiverStopped = false;
+  ["LER", "HER", "IR"].forEach(ring => {
+    const r = s.rings[ring];
+    if (!r) return;
+    if (r.skipped) {
+      html += '<div class="temp-ring-title">' + ring + '</div><div class="footnote">未学習のためスキップ' +
+              '（<code>python temp_equipment.py learn ' + ring + ' &lt;開始&gt; &lt;終了&gt;</code> で学習してください）</div>';
+      return;
+    }
+    if (r.error) {
+      html += '<div class="temp-ring-title">' + ring + '</div><div class="footnote">判定失敗: ' + r.error + '</div>';
+      return;
+    }
+    if (r.archiver_stopped) {
+      anyArchiverStopped = true;
+      html += '<div class="archiver-banner">⚠ ' + ring + ': 現在、アーカイバ(kblog)が温度計のデータ取得を'
+            + '停止中です。学習済みPVすべてで有効なデータが取得できませんでした'
+            + '（判定は行われていません。機器の異常ではありません）。</div>';
+    }
+    const anomalies = r.anomalies || [];
+    const nAnom = (r.n_anomalies != null) ? r.n_anomalies : anomalies.length;  // JSONの総数（表は上位topのみ）
+    totalAnom += nAnom;
+    totalSev3 += anomalies.filter(a => a.severity >= 3).length;
+    const stats = r.stats || {};
+    html += '<div class="temp-ring-title">' + ring + ' — 判定 ' + (stats.n_judged || 0) + ' 本 / 異常 ' +
+            nAnom + ' 本' + (nAnom > anomalies.length ? '（表は上位' + anomalies.length + '本）' : '') +
+            (r.window ? '　窓: ' + r.window.start + '〜' + r.window.end : '') + '</div>';
+    if (!anomalies.length) { html += '<div class="footnote">異常なし</div>'; return; }
+    html += '<table class="temp-table"><thead><tr>' +
+            '<th>sev</th><th>PV</th><th>モデル</th><th>比</th><th>基準</th><th>現在</th><th>理由</th>' +
+            '</tr></thead><tbody>';
+    anomalies.forEach(a => {
+      const rid = ring + ":" + a.pv;
+      const isHom = a.model === "hom";
+      const refCol = isHom ? fmtT(a.dT_ref) + "℃@" + (a.eval_i||0).toFixed(0) + "mA" : _f3(a.b_ref, 1000);
+      const nowCol = isHom ? fmtT(a.dT_now) + "℃@" + (a.eval_i||0).toFixed(0) + "mA" : _f3(a.now && a.now.b, 1000);
+      html += '<tr onclick="toggleEquip(\'' + rid + '\')" style="cursor:pointer">' +
+        '<td><span class="sev-badge sev' + a.severity + '">' + a.severity + '</span></td>' +
+        '<td>' + a.pv + '</td>' +
+        '<td>' + (a.model || "-") + '</td>' +
+        '<td>' + (a.ratio != null ? a.ratio.toFixed(2) + "x" : "—") + '</td>' +
+        '<td>' + refCol + '</td><td>' + nowCol + '</td>' +
+        '<td>' + (EQUIP_REASON_JP[a.reason] || a.reason) + '</td></tr>';
+      if (EQUIP_SEL === rid) {
+        html += '<tr><td colspan="7" style="background:var(--surface2)">' +
+          '<div class="footnote">section=' + a.section + ' tag=' + a.tag +
+          (a.delta_a != null ? '　Δa/Δw0(環境温度差,参考)=' + a.delta_a.toFixed(1) + '℃' : '') +
+          (isHom && a.r2_ref != null ? '　R2:基準' + a.r2_ref.toFixed(3) + '/現在' + (a.now && a.now.r2 != null ? a.now.r2.toFixed(3) : "—") : '') +
+          (!isHom && a.now ? '　n=' + a.now.n + ' r=' + (a.now.r != null ? a.now.r.toFixed(2) : "—") : '') +
+          '</div>' +
+          detailPlotBox('温度 vs ビーム電流（ビームあり点のみ）　' +
+                        '<span style="color:#9ec5fe">●基準</span> ' +
+                        '<span style="color:#e2574a">●調査</span> ' +
+                        '<span style="color:#9ec5fe">━基準フィット</span> ' +
+                        '<span style="color:#e2574a">━調査フィット</span>' +
+                        (a.plot && !a.plot.ref ? '　※linear型は基準期間の生データを保持しないため基準はフィット直線のみ' : ''),
+                        a.plot ? equipScatterPlot(a.plot) : '', !!a.plot) +
+          '</td></tr>';
+      }
+    });
+    html += '</tbody></table>';
+  });
+  host.innerHTML = html;
+  if (badge) {
+    if (anyArchiverStopped) {
+      badge.textContent = "停止中";
+      badge.classList.remove("hot");
+    } else {
+      badge.textContent = totalAnom ? (totalSev3 + "/" + totalAnom) : "";
+      badge.classList.toggle("hot", totalSev3 > 0);
+    }
+  }
+}
+
+function _f3(v, scale) {
+  return (v == null || !isFinite(v)) ? "—" : (v * scale).toFixed(3);
+}
+
+function toggleEquip(rid) {
+  EQUIP_SEL = (EQUIP_SEL === rid) ? null : rid;
+  renderEquipmentAnomalies(EQUIP_STATE);
+}
+
+// 流量計異常検知の理由コード → 日本語（flow_judge.py の REASON_JP と対応）
+const FLOW_REASON_JP = {
+  insufficient_data: "判定不能(データ不足)",
+  normal: "正常",
+  frozen_low: "値の固着(校正基準比も低い・センサ異常濃厚)",
+  frozen_watch: "値の固着(校正基準比は正常範囲・要注視)",
+  stuck_low_severe: "校正基準比で大幅低下(重度・センサ異常濃厚)",
+  stuck_low: "校正基準比で低下(中)",
+  stuck_low_watch: "校正基準比で低下(軽度・要注視)",
+  excess_noise_severe: "指示値不安定(重度)",
+  excess_noise: "指示値不安定(中)",
+  excess_noise_watch: "指示値不安定(軽度・要注視)",
+};
+
+function renderFlowAnomalies(s) {
+  const host = document.getElementById("flow-anomalies");
+  const badge = document.getElementById("tab-badge-flow");
+  if (!s) {
+    host.innerHTML = '<div class="section-title">流量計データがありません</div>';
+    if (badge) { badge.textContent = ""; badge.classList.remove("hot"); }
+    return;
+  }
+  // s.error: 状態ファイルが無い/読めない場合の案内。anomalies が空配列 [] でも JS では
+  // truthy なので、error があり異常データが無いなら案内文を出す（以前は !s.anomalies 判定
+  // だったため [] のとき案内が出ず「異常なし」に見えてしまっていた）。
+  if (s.error && !(s.anomalies && s.anomalies.length)) {
+    host.innerHTML = '<div class="footnote">' + s.error + '</div>';
+    if (badge) { badge.textContent = ""; badge.classList.remove("hot"); }
+    return;
+  }
+  const anomalies = s.anomalies || [];
+  const nAnom = (s.n_anomalies != null) ? s.n_anomalies : anomalies.length;  // JSONの総数（表は上位topのみ）
+  const stats = s.stats || {};
+  let html = "";
+  if (s.archiver_stopped) {
+    html += '<div class="archiver-banner">⚠ 現在、アーカイバ(kblog)が流量計のデータ取得を停止中です。'
+          + 'PV ' + (stats.n_judged || 0) + ' 本すべてで有効なデータが取得できませんでした'
+          + '（判定は行われていません。センサの異常ではありません）。'
+          + (s.generated_at ? '　最終確認: ' + s.generated_at : '') + '</div>';
+  }
+  html += '<div class="temp-ring-title">流量計（センサ自身の異常のみ検知） — '
+        + '判定 ' + (stats.n_judged || 0) + ' 本 / 異常 ' + nAnom + ' 本'
+        + (nAnom > anomalies.length ? '（表は上位' + anomalies.length + '本）' : '')
+        + (stats.n_insufficient ? '　データ不足 ' + stats.n_insufficient + ' 本' : '')
+        + (s.window ? '　窓: ' + s.window.start + '〜' + s.window.end : '') + '</div>';
+  if (!anomalies.length) {
+    html += '<div class="footnote">異常なし</div>';
+  } else {
+    html += '<table class="temp-table"><thead><tr>' +
+            '<th>sev</th><th>PV</th><th>セクション</th><th>校正基準比[%]</th><th>CV[%]</th><th>理由</th>' +
+            '</tr></thead><tbody>';
+    anomalies.forEach(a => {
+      html += '<tr onclick="toggleFlow(\'' + a.pv + '\')" style="cursor:pointer">' +
+        '<td><span class="sev-badge sev' + a.severity + '">' + a.severity + '</span></td>' +
+        '<td>' + a.pv + '</td>' +
+        '<td>' + a.section + '</td>' +
+        '<td>' + fmtT(a.median_pct) + '</td>' +
+        '<td>' + fmtT(a.cv_pct) + '</td>' +
+        '<td>' + (FLOW_REASON_JP[a.reason] || a.reason) + '</td></tr>';
+      if (FLOW_SEL === a.pv) {
+        html += '<tr><td colspan="6" style="background:var(--surface2)">' +
+          '<div class="footnote">tag=' + a.tag + ' sensor_id=' + a.sensor_id +
+          '　n=' + a.n + '(有効' + a.n_valid + ')' +
+          (a.layers && a.layers.frozen ? '　range=' + fmtT(a.layers.frozen.range) : '') +
+          (a.layers && a.layers.glitch ? '　外れ値' + a.layers.glitch.n_glitch + '本' : '') +
+          '</div>' +
+          detailPlotBox('流量 vs 時刻（判定窓。100%=校正基準流量）　' +
+                        '<span style="color:#5b9bd5">━流量[%]</span>',
+                        a.plot ? flowTimePlot(a.plot) : '', !!a.plot) +
+          '</td></tr>';
+      }
+    });
+    html += '</tbody></table>';
+  }
+  host.innerHTML = html;
+  if (badge) {
+    const sev3 = stats.n_anomalies_sev3 || 0;
+    if (s.archiver_stopped) {
+      badge.textContent = "停止中";
+      badge.classList.remove("hot");
+    } else {
+      badge.textContent = nAnom ? (sev3 + "/" + nAnom) : "";
+      badge.classList.toggle("hot", sev3 > 0);
+    }
+  }
+}
+
+function toggleFlow(pv) {
+  FLOW_SEL = (FLOW_SEL === pv) ? null : pv;
+  renderFlowAnomalies(FLOW_STATE);
+}
+
+// ── クリック展開プロット（温度計/機器劣化/流量計）───────────────────────
+// データは各 judge が状態JSONに埋め込んだ間引き済み配列（クリック時の再取得なし）。
+// 欠測(null)は線を切って描く。
+
+// null を含む系列を <polyline> の連続セグメント群に分割して描く
+function _segPolylines(xs, ys, color, width, dash) {
+  let out = "", pts = [];
+  const flush = () => {
+    if (pts.length >= 2) {
+      out += '<polyline points="' + pts.join(" ") + '" fill="none" stroke="' + color +
+             '" stroke-width="' + width + '"' + (dash ? ' stroke-dasharray="' + dash + '"' : '') + '/>';
+    } else if (pts.length === 1) {
+      const [x, y] = pts[0].split(",");
+      out += '<circle cx="' + x + '" cy="' + y + '" r="1.6" fill="' + color + '"/>';
+    }
+    pts = [];
+  };
+  for (let i = 0; i < ys.length; i++) {
+    if (ys[i] == null || !isFinite(ys[i])) { flush(); continue; }
+    pts.push(xs[i].toFixed(1) + "," + ys[i].toFixed(1));
+  }
+  flush();
+  return out;
+}
+
+function _finite(arr) { return (arr || []).filter(v => v != null && isFinite(v)); }
+
+// 温度計: 左軸=温度[℃](赤)、右軸=ビーム電流[mA](緑点線) の時系列（CCGの timeSeriesDual と同型）
+function tempTimePlot(p) {
+  const t = p.t, T = p.temp, B = p.beam, n = t.length;
+  if (!n || !_finite(T).length) return '<div class="footnote">プロットできる有効データがありません</div>';
+  const w = 640, h = 175, padL = 64, padR = 64, padT = 12, padB = 28;
+  const tv = _finite(T);
+  const tmin = Math.min.apply(null, tv), tmax = Math.max.apply(null, tv), tr = (tmax - tmin) || 1;
+  const bv = _finite(B || []);
+  const bmax = bv.length ? (Math.max.apply(null, bv) || 1) : 1;
+  const X = i => padL + (i / ((n - 1) || 1)) * (w - padL - padR);
+  const YT = v => padT + (1 - (v - tmin) / tr) * (h - padT - padB);
+  const YB = v => padT + (1 - v / bmax) * (h - padT - padB);
+  let s = '<svg width="100%" viewBox="0 0 ' + w + ' ' + h + '" style="display:block">';
+  for (let g = 0; g <= 2; g++) {
+    const yy = padT + g * (h - padT - padB) / 2;
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (w - padR) + '" y2="' + yy + '" stroke="#2c313d"/>';
+    s += '<text x="' + (padL - 6) + '" y="' + (yy + 4) + '" fill="#e2574a" font-size="11" text-anchor="end">' +
+         (tmax - g * tr / 2).toFixed(1) + '</text>';
+    if (bv.length) s += '<text x="' + (w - padR + 6) + '" y="' + (yy + 4) + '" fill="#5dcaa5" font-size="11">' +
+                        Math.round(bmax - g * bmax / 2) + '</text>';
+  }
+  [0, Math.floor((n - 1) / 2), n - 1].forEach(i => {
+    if (i >= 0 && i < n) s += '<text x="' + X(i).toFixed(1) + '" y="' + (h - 8) +
+      '" fill="#6b7080" font-size="10" text-anchor="middle">' + hhmm(t[i]) + '</text>';
+  });
+  s += '<text transform="rotate(-90 14 ' + ((padT + h - padB) / 2).toFixed(1) + ')" x="14" y="' +
+       ((padT + h - padB) / 2).toFixed(1) + '" fill="#e2574a" font-size="11" text-anchor="middle">温度 [℃]</text>';
+  if (bv.length) s += '<text transform="rotate(-90 ' + (w - 9) + ' ' + ((padT + h - padB) / 2).toFixed(1) + ')" x="' +
+       (w - 9) + '" y="' + ((padT + h - padB) / 2).toFixed(1) +
+       '" fill="#5dcaa5" font-size="11" text-anchor="middle">ビーム電流 [mA]</text>';
+  s += _segPolylines(T.map((_, i) => X(i)), T.map(v => (v == null || !isFinite(v)) ? null : YT(v)), "#e2574a", 2);
+  if (bv.length) s += _segPolylines(B.map((_, i) => X(i)),
+      B.map(v => (v == null || !isFinite(v)) ? null : YB(v)), "#5dcaa5", 1.6, "3,2");
+  s += '</svg>';
+  return s;
+}
+
+// 機器劣化: 横軸=ビーム電流[mA]、縦軸=温度[℃]。基準散布(薄青)＋調査散布(赤)＋各フィット曲線
+function equipScatterPlot(p) {
+  const groups = [];
+  if (p.ref && p.ref.i && p.ref.i.length) groups.push({d: p.ref, color: "#9ec5fe", kind: "pts"});
+  if (p.now && p.now.i && p.now.i.length) groups.push({d: p.now, color: "#e2574a", kind: "pts"});
+  if (p.ref_fit) groups.push({d: p.ref_fit, color: "#9ec5fe", kind: "line"});
+  if (p.now_fit) groups.push({d: p.now_fit, color: "#e2574a", kind: "line"});
+  if (!groups.length) return '<div class="footnote">プロットできる有効データがありません</div>';
+  const w = 640, h = 220, padL = 64, padR = 14, padT = 12, padB = 34;
+  let imin = Infinity, imax = -Infinity, tmin = Infinity, tmax = -Infinity;
+  groups.forEach(g => {
+    g.d.i.forEach(v => { if (v < imin) imin = v; if (v > imax) imax = v; });
+    g.d.t.forEach(v => { if (v < tmin) tmin = v; if (v > tmax) tmax = v; });
+  });
+  const ir = (imax - imin) || 1, tr = (tmax - tmin) || 1;
+  const X = v => padL + ((v - imin) / ir) * (w - padL - padR);
+  const Y = v => padT + (1 - (v - tmin) / tr) * (h - padT - padB);
+  let s = '<svg width="100%" viewBox="0 0 ' + w + ' ' + h + '" style="display:block">';
+  for (let g = 0; g <= 2; g++) {
+    const yy = padT + g * (h - padT - padB) / 2;
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (w - padR) + '" y2="' + yy + '" stroke="#2c313d"/>';
+    s += '<text x="' + (padL - 6) + '" y="' + (yy + 4) + '" fill="#6b7080" font-size="11" text-anchor="end">' +
+         (tmax - g * tr / 2).toFixed(1) + '</text>';
+  }
+  [imin, (imin + imax) / 2, imax].forEach(v => {
+    s += '<text x="' + X(v).toFixed(1) + '" y="' + (h - 8) +
+         '" fill="#6b7080" font-size="10" text-anchor="middle">' + Math.round(v) + '</text>';
+  });
+  s += '<text x="' + ((padL + w - padR) / 2).toFixed(1) + '" y="' + (h - 20) +
+       '" fill="#6b7080" font-size="11" text-anchor="middle">ビーム電流 [mA]</text>';
+  s += '<text transform="rotate(-90 14 ' + ((padT + h - padB) / 2).toFixed(1) + ')" x="14" y="' +
+       ((padT + h - padB) / 2).toFixed(1) + '" fill="#6b7080" font-size="11" text-anchor="middle">温度 [℃]</text>';
+  groups.forEach(g => {
+    if (g.kind === "pts") {
+      g.d.i.forEach((iv, k) => {
+        const tv = g.d.t[k];
+        if (tv == null || !isFinite(tv) || iv == null || !isFinite(iv)) return;
+        s += '<circle cx="' + X(iv).toFixed(1) + '" cy="' + Y(tv).toFixed(1) +
+             '" r="1.7" fill="' + g.color + '" fill-opacity="0.55"/>';
+      });
+    } else {
+      s += '<polyline points="' + g.d.i.map((iv, k) => X(iv).toFixed(1) + ',' + Y(g.d.t[k]).toFixed(1)).join(" ") +
+           '" fill="none" stroke="' + g.color + '" stroke-width="2.2"/>';
+    }
+  });
+  s += '</svg>';
+  return s;
+}
+
+// 流量計: 縦軸=流量[%] の時系列（単軸）
+function flowTimePlot(p) {
+  const t = p.t, V = p.v, n = t.length;
+  if (!n || !_finite(V).length) return '<div class="footnote">プロットできる有効データがありません</div>';
+  const w = 640, h = 160, padL = 64, padR = 14, padT = 12, padB = 28;
+  const vv = _finite(V);
+  const vmin = Math.min.apply(null, vv), vmax = Math.max.apply(null, vv), vr = (vmax - vmin) || 1;
+  const X = i => padL + (i / ((n - 1) || 1)) * (w - padL - padR);
+  const Y = v => padT + (1 - (v - vmin) / vr) * (h - padT - padB);
+  let s = '<svg width="100%" viewBox="0 0 ' + w + ' ' + h + '" style="display:block">';
+  for (let g = 0; g <= 2; g++) {
+    const yy = padT + g * (h - padT - padB) / 2;
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (w - padR) + '" y2="' + yy + '" stroke="#2c313d"/>';
+    s += '<text x="' + (padL - 6) + '" y="' + (yy + 4) + '" fill="#5b9bd5" font-size="11" text-anchor="end">' +
+         (vmax - g * vr / 2).toFixed(1) + '</text>';
+  }
+  [0, Math.floor((n - 1) / 2), n - 1].forEach(i => {
+    if (i >= 0 && i < n) s += '<text x="' + X(i).toFixed(1) + '" y="' + (h - 8) +
+      '" fill="#6b7080" font-size="10" text-anchor="middle">' + hhmm(t[i]) + '</text>';
+  });
+  s += '<text transform="rotate(-90 14 ' + ((padT + h - padB) / 2).toFixed(1) + ')" x="14" y="' +
+       ((padT + h - padB) / 2).toFixed(1) + '" fill="#5b9bd5" font-size="11" text-anchor="middle">流量 [%]</text>';
+  s += _segPolylines(V.map((_, i) => X(i)), V.map(v => (v == null || !isFinite(v)) ? null : Y(v)), "#5b9bd5", 2);
+  s += '</svg>';
+  return s;
+}
+
+// 展開行に入れるプロット枠（plot データが無い旧形式JSONへの案内も出す）
+function detailPlotBox(cap, inner, hasData) {
+  if (!hasData) return '<div class="footnote">プロットデータがありません（この判定JSONは旧形式です。' +
+                       '次回の判定サイクルから表示されます）</div>';
+  return '<div class="plotbox" style="margin-top:8px"><div class="cap">' + cap + '</div>' + inner + '</div>';
+}
+
 function toggleIP(ring, section) {
   IP_SEL[ring] = (IP_SEL[ring] === section) ? null : section;
   renderIPAnomalies(STATE); renderIPDetail();
@@ -1105,6 +1809,27 @@ async function refresh() {
       "5 秒ごとに自動更新。データ源: " + (STATE._source || "dashboard_state.json / ダミー");
   } catch (e) {
     document.getElementById("footnote").textContent = "更新失敗: " + e;
+  }
+  try {
+    const rt = await fetch("/api/temp_state", {cache: "no-store"});
+    TEMP_STATE = await rt.json();
+    renderTempAnomalies(TEMP_STATE);
+  } catch (e) {
+    // 温度計データ取得失敗は圧力/IP タブの動作を止めない
+  }
+  try {
+    const re_ = await fetch("/api/equipment_state", {cache: "no-store"});
+    EQUIP_STATE = await re_.json();
+    renderEquipmentAnomalies(EQUIP_STATE);
+  } catch (e) {
+    // 機器劣化データ取得失敗は他タブの動作を止めない
+  }
+  try {
+    const rf = await fetch("/api/flow_state", {cache: "no-store"});
+    FLOW_STATE = await rf.json();
+    renderFlowAnomalies(FLOW_STATE);
+  } catch (e) {
+    // 流量計データ取得失敗は他タブの動作を止めない
   }
 }
 refresh();
@@ -1187,6 +1912,18 @@ class Handler(BaseHTTPRequestHandler):
                 state["_source"] = "dashboard_state.json" if os.path.isfile(STATE_FILE) else "内蔵ダミーデータ"
             self._send(200, json.dumps(state, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8")
+        elif self.path.startswith("/api/temp_state"):
+            state = load_temp_state()
+            self._send(200, json.dumps(state, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        elif self.path.startswith("/api/equipment_state"):
+            state = load_equipment_state()
+            self._send(200, json.dumps(state, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        elif self.path.startswith("/api/flow_state"):
+            state = load_flow_state()
+            self._send(200, json.dumps(state, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
         elif self.path.startswith("/api/ip_raw"):
             from urllib.parse import urlparse, parse_qs
             q = parse_qs(urlparse(self.path).query)
@@ -1216,25 +1953,43 @@ class Handler(BaseHTTPRequestHandler):
         pass  # アクセスログを抑制
 
 def main():
-    # 二重起動防止（共用サーバーで複数立ち上げを防ぐ）
+    # ポート: --port 引数 > DASHBOARD_PORT 環境変数 > 既定 PORT(18050)。
+    # 本番を止めずに別ポートでデモ表示を確認できるようにするため。
+    port = PORT
+    if "--port" in sys.argv:
+        i = sys.argv.index("--port")
+        if i + 1 < len(sys.argv):
+            try:
+                port = int(sys.argv[i + 1])
+            except ValueError:
+                print("エラー: --port の値が不正です: %r" % sys.argv[i + 1]); return
+    elif os.environ.get("DASHBOARD_PORT"):
+        try:
+            port = int(os.environ["DASHBOARD_PORT"])
+        except ValueError:
+            print("エラー: DASHBOARD_PORT が不正です: %r" % os.environ["DASHBOARD_PORT"]); return
+
+    # 二重起動防止（共用サーバーで複数立ち上げを防ぐ）。ロックはポートごとに分ける。
+    # ポートを変えて（例: デモ確認用に別ポートで）起動する場合は、本番インスタンスの
+    # ロックと衝突しないようにするため（同じ dashboard.py プロセス名でも別ポートなら共存可）。
     try:
         import singleton
-        lock = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dashboard.lock")
-        if not singleton.guard(lock, "dashboard.py", "ダッシュボード"):
+        lock = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dashboard.%d.lock" % port)
+        if not singleton.guard(lock, "dashboard.py", "ダッシュボード（ポート %d）" % port):
             return
     except Exception:
         pass  # singleton が無くても起動はできる（ポート占有でも二重起動は実質防がれる）
 
     try:
-        srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     except OSError as ex:
-        print("ポート %d を開けませんでした（既に使用中かもしれません）: %s" % (PORT, ex))
+        print("ポート %d を開けませんでした（既に使用中かもしれません）: %s" % (port, ex))
         return
     src = ("デモ（合成データ）" if os.environ.get("RECORD_RAW_DEMO")
            else ("dashboard_state.json" if os.path.isfile(STATE_FILE) else "内蔵ダミーデータ"))
     print("圧力異常モニター（プロトタイプ）起動")
     print("  データ源: %s" % src)
-    print("  ローカル:  http://localhost:%d" % PORT)
+    print("  ローカル:  http://localhost:%d" % port)
     print("  停止: Ctrl-C")
     try:
         srv.serve_forever()

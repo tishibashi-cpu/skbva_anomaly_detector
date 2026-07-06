@@ -333,7 +333,7 @@ def learn(ring, start, end, interval_sec=300, out_path=MODELS_FILE, cfg=CONFIG,
 
     store = _load_models(out_path)
     rd = store.setdefault(ring, {})
-    n_trust = n_low = n_skip = 0
+    n_trust = n_low = n_skip = n_raw_trust = 0
 
     for ip_name, ccg_name, supply, section in pairs:
         d = _collect_d(fetched_list, ip_name, ccg_name)
@@ -369,6 +369,8 @@ def learn(ring, start, end, interval_sec=300, out_path=MODELS_FILE, cfg=CONFIG,
 
         prev = rd.get(ip_name)
         ip_trusted = model["ip_trust"]
+        if ip_trusted:
+            n_raw_trust += 1   # 今回窓「単独」でのフィット結果（マージ前）。参考値。
 
         # 学習窓汚染ガード:
         #  (1) I-P モデル: low-trust なら前の良 I-P モデルを保持（放電を正常学習しない）
@@ -386,15 +388,15 @@ def learn(ring, start, end, interval_sec=300, out_path=MODELS_FILE, cfg=CONFIG,
                 model["band_jump_held"] = True
 
         rd[ip_name] = model
-        if ip_trusted:
+        if model["ip_trust"]:      # マージ後の実効値でカウント（前回の良モデルを保持した分も「trust」に数える）
             n_trust += 1
         else:
             n_low += 1
 
     store["_meta"] = {"cfg": cfg}
     _save_models(store, out_path)
-    print("[learn %s] ip_trust=%d  ip_low_trust=%d  skip=%d  → %s"
-          % (ring, n_trust, n_low, n_skip, out_path))
+    print("[learn %s] ip_trust=%d(実効・保持分含む)  raw=%d(今回窓のみ)  ip_low_trust=%d  skip=%d  → %s"
+          % (ring, n_trust, n_raw_trust, n_low, n_skip, out_path))
     return out_path, store
 
 

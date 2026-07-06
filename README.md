@@ -72,7 +72,7 @@ Host ckdash
 
 ## 2. このプログラムは何をしているのか
 
-判定の考え方を、用語をできるだけ使わずにまとめます（詳しくは末尾「12. 参考文献」の論文）。
+判定の考え方を、用語をできるだけ使わずにまとめます（詳しくは末尾「16. 参考文献」の論文）。
 
 ### 2-1. 何のためのもの？
 
@@ -126,13 +126,37 @@ Host ckdash
 **ゆっくりした変化や高止まりした異常は見逃しうる**という性質があります。
 **日々の圧力値の目視点検と併用**してください（高止まりは目視点検で気づけます）。
 
+### 2-6. 圧力（CCG）以外にも4つの判定軸がある
+
+ここまでの説明は「圧力異常検知」タブ（CCG約600台）についてでした。ダッシュボードには
+他に4つのタブがあり、それぞれ独立した判定を行っています（見方は次章）。
+
+| タブ | 見ているもの | 判定の方式（ざっくり） |
+|---|---|---|
+| イオンポンプ異常放電 | イオンポンプの放電電流の異常 | 正常期間に学習した圧力-電流関係（固定モデル）とのズレ |
+| 温度計異常検知 | ビームパイプ温度計**センサ自体**の故障 | CCGと同じ「数日前の自分」とのローリング比較 |
+| 機器劣化検知 | センサは正常な前提で、**測定対象機器側**の熱結合劣化（放熱不良等） | 運用者が明示的に学習した過去の健全期間（固定モデル）との比較。年単位の緩慢な変化向け |
+| 流量計異常検知 | 冷却水流量計**センサ自体**の故障（実際の流量低下は別のアラームが担当） | 学習不要。直近の指示値だけを固定閾値で判定 |
+
+いずれも「異常の候補を挙げて人間の確認を促す」もので、最終判断は現場での確認が前提です。
+
 ---
 
 ## 3. ダッシュボードの見方
 
-画面の各部の意味です。
+画面上部に **タブが5つ**あります：「圧力異常検知」「イオンポンプ異常放電」「温度計異常検知」
+「機器劣化検知」「流量計異常検知」。クリックで切り替えます（同じページ内でJSでの切り替え。
+ページ遷移はしません）。各タブの見出しにその日の異常件数バッジが出ます（sev3を含む場合は赤）。
 
-**上部のヘッダ**
+> **黄色いバナー「⚠ 現在、アーカイバ(kblog)が…データ取得を停止中です」について**：
+> シャットダウン期間などでアーカイバが温度計・流量計のデータ記録を止めている間は、
+> 温度計異常検知・機器劣化検知・流量計異常検知の各タブにこのバナーが出て、タブのバッジも
+> 「停止中」になります。これは**センサや機器の異常ではなく**、判定に使うデータ自体が
+> 取得できていない状態を示すものです（アーカイバが復旧すれば自動的に通常の判定表示に戻ります）。
+
+各部の意味です。
+
+**上部のヘッダ**（全タブ共通）
 - **LER/HER のビーム状態**：2つの値を並べて表示します。
   - **現在 … mA**：蓄積電流 PV（`BMLDCCT:CURRENT` / `BMHDCCT:CURRENT`）から数秒ごとに取る**リアルタイム値**。
   - **最終チェック …**：検知プログラムが**最後に判定したとき**のビーム状態（検知由来）。
@@ -144,6 +168,8 @@ Host ckdash
 - **本プログラム CPU / Mem**：このダッシュボード自身が使っている分だけの数字。
 - **最終チェック**：検知プログラムが最後に判定した時刻。
 - **判定: FNN**：判定に使っている方式（ニューラルネット）。
+
+**「圧力異常検知」タブ**
 
 **サマリーカード**
 - **監視中の真空計**：見張っている台数（例 605、内訳 LER 308 / HER 297）。
@@ -161,13 +187,54 @@ Host ckdash
 - 異常が無い静かな期間は「**直近N日に検知された異常はありません ✓**」と表示され、
   参考までに「最後に記録された異常: …」が添えられます。
 
-**イオンポンプ 異常モニター**（CCG とは別枠）
+**「イオンポンプ異常放電」タブ**
 - 放電電流の異常を検知したイオンポンプを一覧します（急性を上に表示）。
-- 各カードに深刻度バッジ（**sev3 のみ表示**）・急性/慢性バッジ・**「N 回連続」バッジ**・逸脱量（+X.X dex）を表示し、
-  右側に **異常カウントの推移プロット**（縦軸 **Anomaly Count**＝sev3 連続カウント、横軸 **Judge Cycle**）を描く。
-  sev1/sev2 はカードに出しません（後述の表示ゲート／ビーム軸格下げによる誤検知抑制）。
+- 各カードに深刻度バッジ（**sev3/sev2/sev1 すべて表示**）・急性/慢性バッジ・**「N 回連続」バッジ**・
+  逸脱量（+X.X dex）を表示し、右側に **異常カウントの推移プロット**（縦軸 **Anomaly Count**＝sev3
+  連続カウント、横軸 **Judge Cycle**）を描く。
 - クリックすると詳細グラフが開きます：**放電電流 vs 時刻**（無ビーム区間を網掛け・学習バンド
   p50–p95 を水平帯で重ね描き）と、**電流 vs 圧力**（I-P・両対数、`I=a·P^b` 回帰つき）。
+
+**「温度計異常検知」タブ**
+- LER/HER それぞれについて、直近窓（既定24h）で判定した異常をランク表示します（`temp_detector/`
+  が生成する `temp_dashboard_state.json` を読む。無ければ「temp_headless.py を実行してください」
+  という案内が出るだけで、他タブの動作には影響しません）。
+- 列：severityバッジ（sev1〜3）・PV・種別（BL/CLM/GV等）・t_med/t_min/t_max・理由（短絡疑い／
+  無ビーム高温／ビーム反相関／グリッチ頻発 等、日本語）。
+- 行をクリックすると詳細（section/tag・持続割合・ビーム相関等の内部メトリクス）と、
+  **温度＆ビーム電流 vs 時刻**のグラフ（左軸：温度[℃]・赤、右軸：ビーム電流[mA]・緑点線。
+  判定窓の間引き時系列）が展開されます。
+
+**「機器劣化検知」タブ**
+- 温度計**センサ自体**の故障を見る「温度計異常検知」タブとは別の判定軸で、**センサは正常な前提で、
+  測定対象の機器側**（放熱不良・断熱劣化・接触不良による発熱増加等）の劣化を見ます（IR/LER/HER
+  いずれのリングも対象）。`temp_detector/` が生成する `temp_equipment_state.json` を読む
+  （`detector_headless.py --equipment-judge` または相乗り実行、もしくは `temp_equipment.py
+  judge-all` で更新）。
+- リングごとに、まだ `learn`（基準期間の学習）していなければ「未学習のためスキップ」と表示され、
+  他のリングやタブの動作には影響しません。
+- 列：severityバッジ（sev1〜3）・PV・モデル種別（`linear`/`hom`）・比・基準/現在の値（`linear`は
+  傾き dT/dI、`hom`は代表運転電流での予測発熱量）・理由（発熱増加(軽度/中/重度) 等、日本語）。
+- 行をクリックすると詳細（section/tag・環境温度差(Δa/Δw0、参考)・フィット品質等）と、
+  **温度 vs ビーム電流の散布図**（基準期間＝薄青・調査期間＝赤の実測点と、それぞれのフィット
+  曲線。ビームあり点のみ）が展開されます。`hom`型は判定のために基準期間の生データも再取得する
+  ので基準側の散布点も表示されますが、`linear`型は保存済みフィット係数しか持たないため基準は
+  フィット直線のみです。
+- 機器の熱結合特性は年〜数年スケールでしか動かない量のため、他タブと違って**判定は毎回学習し
+  直さず**、運用者が明示的に学習した固定モデルを使い続けます（詳細は第II部 14 章「機器劣化検知」節）。
+
+**「流量計異常検知」タブ**
+- 冷却水流量計の**センサ自身の異常**だけを見ます（実際の流量低下は別のアラームシステムが検知
+  するため対象外。運用上、流量計は分解清掃すれば指示値が元に戻る個体故障がほとんどで、実際に
+  流量が落ちたことは無いとのこと）。ビーム電流と無関係の機器なので、CCG/温度計/機器劣化検知と
+  違い**リング(LER/HER)の概念を持たず**、直近窓（既定24h）の指示値だけで判定します
+  （`flow_detector/` が生成する `flow_dashboard_state.json` を読む）。
+- 列：severityバッジ（sev1〜3）・PV・セクション（D01〜D12）・校正基準比[%]（100%＝ある時点で
+  取った基準流量と同じ流量）・CV[%]（指示値の変動係数）・理由（値の固着／校正基準比で低下／
+  指示値不安定 等、日本語）。
+- 行をクリックすると詳細（tag/sensor_id・有効点数・張り付き検知時のrange・外れ値の本数）と、
+  **流量 vs 時刻**のグラフ（縦軸：流量[%]。判定窓の間引き時系列）が展開されます。
+- 詳細は第II部 15 章「拡張：冷却水流量計異常検知」節を参照。
 
 ---
 
@@ -181,18 +248,21 @@ Host ckdash
 ```
 検知（判定）            → 結果ファイル → アダプタ          → 表示
 detector_headless.py      *_Result_*    state_builder.py   dashboard.py
-（末次プログラムを GUI なしで              → dashboard_state.json → ブラウザ:18050
-  import して判定を回す）
+（末次プログラムを GUI なしで              → dashboard_state.json → ブラウザ:18050（5タブ）
+  import して判定を回す。IP/温度計/機器劣化/流量計も相乗り）
 ```
 
 新しいプログラム群は **トップ（`~/skbva_anomaly_detector`）** に置き、末次さんのプログラム本体と実行時データは
-**`legacy/`** にまとめています。
+**`legacy/`** に、温度計異常検知は独立した自己完結パッケージとして **`temp_detector/`** にまとめています。
 
 ```
 ~/skbva_anomaly_detector/                            ← ここから各プログラムを起動
-├── detector_headless.py             検知本体を GUI なしで回す（実機: EPICS/kblogrd 必要）
+├── detector_headless.py             検知本体を GUI なしで回す（実機: EPICS/kblogrd 必要）。
+│                                     CCG判定に加え、IP judge・温度計judgeも段階分散して相乗り実行する
 ├── state_builder.py                 legacy/ の結果ファイル → dashboard_state.json
-├── dashboard.py                     JSON をブラウザ配信（:18050）。Save Normal/Abnormal ボタンは label_queue.jsonl に追記
+├── dashboard.py                     JSON をブラウザ配信（:18050）。5タブ（圧力/イオンポンプ/温度計/機器劣化/流量計）。
+│                                     Save Normal/Abnormal ボタンは label_queue.jsonl に追記。
+│                                     --port / DASHBOARD_PORT で別ポート起動可（本番と共存できる）
 ├── apply_labels.py                  label_queue.jsonl を読み legacy の Save_Manual_* で教師行を追記（実機・人手実行）
 ├── label_queue.jsonl                教師ラベルのキュー（ボタン押下で追記。実行時生成）
 ├── record_raw.py                    詳細ビュー用の生データ取得。CCG=2入力モデル 圧力=w0·I+w1·(I²/Nb)²+w2 の散布図/時系列、IP=電流vs時刻・I-P散布図（学習バンド/I=a·P^b 重ね描き）
@@ -200,23 +270,58 @@ detector_headless.py      *_Result_*    state_builder.py   dashboard.py
 ├── cause_infer.py                   推定原因をヘッドレス再現（純 numpy、h5py のみ）
 ├── sysload.py                       サーバー負荷＋自プロセス使用量（標準ライブラリのみ）
 ├── beamcurrent.py                   蓄積電流（リアルタイム）を EPICS から読む
-├── singleton.py                     二重起動防止の PID ロック（標準ライブラリのみ）
+├── singleton.py                     二重起動防止の PID ロック（標準ライブラリのみ）。ロックファイルは
+│                                     ポートごとに分ける（`.dashboard.<port>.lock`）ので、本番と別ポートの
+│                                     デモ起動を同時に走らせても衝突しない
 ├── ip_pv.py                         イオンポンプPV読み込み（電源種別判別）※拡張
 ├── ip_fetch.py                      イオンポンプ放電電流の履歴を kblogrd で取得 ※拡張
-├── ip_state.py                      取得履歴→ダッシュボード用の ion_pumps 構造に変換 ※拡張
+├── ip_state.py                      取得履歴→ダッシュボード用の ion_pumps 構造に変換（現在は renderIonPumps
+│                                     が no-op のため非表示。judge セクションに一本化）※拡張
 ├── ccg_fetch.py                     CCG 圧力の履歴を kblogrd で取得（観察用）※拡張
 ├── ip_observe.py                    同一地点ペアの圧力 vs 放電電流を PNG 出力（観察用）※拡張
 ├── ip_judge.py                      イオンポンプ放電電流の異常判定（学習＋L0a/L0b/L1/L2＋ビーム軸格下げ＋急性/慢性）※拡張（運用中）
 ├── beam_fetch.py                    蓄積ビーム電流の履歴を kblogrd で取得（判定用）※拡張
 ├── ip_data.json                     ip_state が保存、state_builder が読む ※拡張
-├── ip_models.json                   ip_judge learn が保存、judge が読む（実行時生成）※拡張
+├── ip_models.json                   ip_judge learn が保存、judge が読む（固定モデル方式。実行時生成）※拡張
+├── ip_models_rolling.json           IP_JUDGE_ROLLING=True 時のみ。judge のたびに直近数日から作り直す
+│                                     ローリング基準モデル（実行時生成、既定では未使用）※拡張
 ├── ip_judge_state.json              judge --out-json の出力。state_builder が読み専用セクションに反映（実行時生成）※拡張
 ├── ip_judge_counts.json             sev3 の累積カウント（継続したものだけ表示するため。実行時生成）※拡張
 ├── ip_judge_history.json            PVごとの sev3 連続カウント履歴（カードの推移プロット用。実行時生成）※拡張
 ├── tools/                           調査用スクリプト（band_check / beam_peek / ip_corr_survey / ip_beam_survey）。判定本体には不要
-├── pv_info/                         PV リストの CSV をまとめて置く
-│   ├── LER_CCG_PV.csv / HER_CCG_PV.csv   監視対象 CCG（1列目 PV名のみ）
-│   └── LER_IP_PV.csv / HER_IP_PV.csv     監視対象イオンポンプ電流（1列目 PV名）※拡張
+├── pv_info/                         PV リストの CSV をまとめて置く（CCG/IP/温度計 共通の置き場）
+│   ├── LER_CCG_PV.csv / HER_CCG_PV.csv       監視対象 CCG（1列目 PV名のみ）
+│   ├── LER_IP_PV.csv / HER_IP_PV.csv         監視対象イオンポンプ電流（1列目 PV名）※拡張
+│   ├── LER_TEMP_PV.csv / HER_TEMP_PV.csv     監視対象ビームパイプ温度計（VA{L,H}TMP形式）※拡張
+│   ├── IR_TEMP_PV.csv                        IR（衝突点周辺）フォーカス磁石温度計（FB_MOVE形式）※拡張
+│   ├── TEMP_RING_OVERRIDE.csv                温度計のリング所属の例外（配線間違い・一時移設等。手編集可）※拡張
+│   └── FLOW_PV.csv                           監視対象冷却水流量計（1列目 PV名のみ。リング分けは無い）※拡張
+├── temp_detector/                   温度計異常検知（自己完結パッケージ。CCG/IPのコードに依存しない）※拡張
+│   ├── temp_pv.py                       PV名パーサ（VA{L,H}TMP形式＋IR/FB_MOVE形式。上下ペア検出）
+│   ├── temp_fetch.py                    kblogrd取得（VA/VATemp・IRはBM/BMOthers）、ビーム/バンチ数(Misc/Base)取得、リング例外の適用
+│   ├── temp_judge.py                    判定コア（センサ故障。層: H0範囲/H1張り付き/N ノイズ/G グリッチ/S 短絡/
+│   │                                     O 無ビーム高温/B ビーム反相関/I 間欠逸脱/P 上下ペア）
+│   ├── temp_batch.py                    全台バッチ判定CLI（`run`に`--rolling`でCCG式ローリング基準）
+│   ├── temp_headless.py                 定期実行（cron `--once` or 常駐ループ、両リング判定して
+│   │                                     temp_dashboard_state.json を書く）
+│   ├── temp_probe.py                    特定センサの波形・判定を見る較正/診断用ツール（センサ故障側）
+│   ├── temp_equipment.py                機器劣化検知（learn/judge/judge-all/compare/scan。linear/homモデル、
+│   │                                     全リング対応。temp_equipment_models.json を生成）
+│   └── temp_equipment_plot.py           機器劣化検知の比較散布図（温度 vs ビーム電流）を出力
+├── temp_detector/temp_equipment_models.json   temp_equipment.py learn が保存、judge/run_periodic_judge が読む
+│                                     （固定モデル方式。実行時生成）※拡張
+├── temp_detector/temp_equipment_state.json    run_periodic_judge（detector_headless.py 相乗り／
+│                                     judge-all）が書く。dashboard.py の「機器劣化検知」タブが読む（実行時生成）※拡張
+├── flow_detector/                   冷却水流量計異常検知（自己完結パッケージ。ビーム電流と無関係・
+│                                     リング概念も持たない。他パッケージに依存しない）※拡張
+│   ├── flow_pv.py                       PV名パーサ（VA_FLS形式。リング判定は無い）
+│   ├── flow_fetch.py                    kblogrd取得（ログ群 VA/VAFlow、実機確認済み。既定間隔30s）
+│   ├── flow_judge.py                    判定コア（直近窓だけの絶対閾値判定。層: frozen/stuck_low/
+│   │                                     excess_noise/glitch。CCG式ローリング基準・固定モデル学習は不要）
+│   └── flow_headless.py                 定期実行（cron `--once` or 常駐ループ。全PV判定して
+│                                         flow_dashboard_state.json を書く）
+├── flow_detector/flow_dashboard_state.json    flow_headless.py（detector_headless.py 相乗り／単独実行）が
+│                                     書く。dashboard.py の「流量計異常検知」タブが読む（実行時生成）※拡張
 ├── dashboard_state.json             ← state_builder が生成
 ├── README.md
 └── legacy/                          末次プログラム本体＋実行時データ
@@ -227,13 +332,19 @@ detector_headless.py      *_Result_*    state_builder.py   dashboard.py
 ```
 
 - **detector_headless.py**：`legacy/` の本体を一行も書き換えずに import し、GUI を出さずに判定だけ回す。
+  CCGの検知サイクルに、IP judge・温度計judge・機器劣化judge・流量計judgeを段階分散
+  （`STAGE_STAGGER_SEC`、既定5分間隔）させて相乗り実行する（機器劣化judgeのみ既定で1日おき、
+  流量計judgeはCCG/IP/温度計と同じ4hおき、詳細は第II部 7 章）。
 - **state_builder.py**：検知が書いた蓄積ファイル（`legacy/`）を読んで `dashboard_state.json` を作る（読み取り専用）。
-- **dashboard.py**：その JSON を読んでブラウザに表示する（ポート 18050）。
+- **dashboard.py**：その JSON（＋ `temp_detector/temp_dashboard_state.json`、`temp_detector/temp_equipment_state.json`、
+  `flow_detector/flow_dashboard_state.json`）を読んでブラウザに表示する（ポート 18050、`--port`/`DASHBOARD_PORT` で変更可）。
 - **ccg_pv.py**：監視 CCG リストを CSV から読む。
 - **cause_infer.py**：推定原因を keras なしで再現する（第II部 9 章）。
 - **sysload.py**：共用サーバーの負荷と、本プログラム自身の使用量を読む。
 - **beamcurrent.py**：蓄積電流 PV（`BMLDCCT:CURRENT` / `BMHDCCT:CURRENT`）からリアルタイムのビーム電流を読む。
-- **singleton.py**：二重起動防止の PID ロック。
+- **singleton.py**：二重起動防止の PID ロック（ポート別）。
+- **temp_detector/**：温度計異常検知一式（詳細は第II部 14 章）。
+- **flow_detector/**：冷却水流量計異常検知一式（詳細は第II部 15 章）。
 - **LER_CCG_PV.csv / HER_CCG_PV.csv**：監視対象 CCG（1列目が PV名）。
 
 本体は `.sh`・モデル・結果ファイルをすべて作業ディレクトリ相対で読み書きするため、`detector_headless.py` は
@@ -320,7 +431,9 @@ nohup python dashboard.py >& dashboard.log &
   ログアウト後も動き続け、各メンバーは各自トンネルを張って見られます。
 - 出力は `dashboard.log` に出ます。`>&` は tcsh の書き方（`2>&1` は使えません）。
 - 起動・配信は `kekb-co-user01` 上で行うこと（メンバーのトンネル先と同じホスト）。
-- 二重起動はできません（`.dashboard.lock` とポート占有で防止）。すでに起動中なら「既に PID xxxx で起動中」と出て終了します。
+- 二重起動はできません（`.dashboard.<port>.lock` とポート占有で防止。ロックはポートごとに分かれるので、
+  本番を止めずに別ポートでデモ起動することもできる＝下記参照）。すでに同じポートで起動中なら
+  「既に PID xxxx で起動中」と出て終了します。
 - 止めるときは `pkill -f dashboard.py`（または該当 PID を kill）。
 
 メンバーは第I部のとおり各自トンネルを張って同じ画面を見ます（サーバーは1つでよい）。
@@ -329,7 +442,9 @@ nohup python dashboard.py >& dashboard.log &
 
 検知を回さずに、ダッシュボードの見た目（サイドバーのトレンド、PV選択時の生データプロット）を
 Mac 等で確認したいとき。環境変数 `RECORD_RAW_DEMO=1` を立てて起動すると、state も詳細ビューの
-生データも合成データになり（`dashboard_state.json` があっても無視される）、全体が一貫して表示される。
+生データも合成データになり（`dashboard_state.json` があっても無視される）、**5タブすべて**
+（圧力異常検知・イオンポンプ異常放電・温度計異常検知・機器劣化検知・流量計異常検知）が
+一貫してダミーデータで表示される。
 
 ```bash
 cd skbva_anomaly_detector
@@ -337,10 +452,20 @@ RECORD_RAW_DEMO=1 python3 dashboard.py              # http://localhost:18050
 # 確認したら Ctrl-C
 ```
 
+**本番を止めずに別ポートで確認したい場合**は `--port`（または `DASHBOARD_PORT` 環境変数）を付ける。
+ロックファイルがポートごとに分かれるため、本番（18050）と共存できる。
+
+```bash
+RECORD_RAW_DEMO=1 python3 dashboard.py --port 18077        # 本番(18050)とは別に起動できる
+```
+
 - サイドバー右のトレンド（縦軸 Anomaly Count・縦書きラベル・Period 目盛り）が表示される
   （デモ state のダミー series には `abnormal` が入っているため）。
 - PV カードをクリックすると、合成の「圧力 vs ビーム電流（散布図＋2入力モデル回帰曲線）」
   「圧力＆ビーム電流 vs 時刻」が出る（圧力軸が `1.31e-6` 形式で表示される）。
+- イオンポンプタブ・温度計タブ・機器劣化タブ・流量計タブにもダミーの異常データ（sev1〜3混在。
+  機器劣化タブは linear/hom両モデルの表示例と未学習リングのスキップ表示例を、流量計タブは
+  値の固着/校正基準比の低下/指示値不安定の3パターンを1件ずつ含む）が表示される。
 - これは見た目確認専用。実データではないので数値に意味は無い。実運用では環境変数を付けないこと。
 
 ---
@@ -381,13 +506,27 @@ python apply_labels.py             # queued を順に反映（実機・kblogrd �
 
 ```tcsh
 cd ~/skbva_anomaly_detector
-# 1回だけ（リングごとに JSON 更新。完了で「=== --once 完了 …」）
+# 1回だけ（リングごとに JSON 更新。完了で「=== --once 完了 …」。IP/温度計/機器劣化/流量計judgeも1回走る）
 python detector_headless.py --once
 
 # イオンポンプ judge だけ1回（ip_judge_state.json を更新。初回投入/テスト用）
 python detector_headless.py --ip-judge
+# 判定窓を指定したいとき（既定は直近24h）
+python detector_headless.py --ip-judge --hours 72                       # 直近72時間
+python detector_headless.py --ip-judge --end 20260620000000 --hours 48  # 過去の特定期間を狙う
 
-# アボートトリガ常駐（推奨：アボートで即解析＋定期チェック）
+# 温度計 judge だけ1回（temp_detector/temp_dashboard_state.json を更新。初回投入/テスト用）
+python detector_headless.py --temp-judge
+
+# 機器劣化 judge だけ1回（temp_detector/temp_equipment_state.json を更新。learn済みモデルが
+# 無いリングは自動スキップ。初回投入/テスト用）
+python detector_headless.py --equipment-judge
+
+# 流量計 judge だけ1回（flow_detector/flow_dashboard_state.json を更新。ビーム電流と無関係・
+# 直近窓だけの判定なので学習等の事前準備は不要。初回投入/テスト用）
+python detector_headless.py --flow-judge
+
+# アボートトリガ常駐（推奨：アボートで即解析＋定期チェック。IP/温度計/機器劣化/流量計judgeも段階分散して相乗り）
 # 端末を開いたまま、フォアグラウンドで動かす。停止は Ctrl-C。
 python detector_headless.py --watch
 
@@ -396,6 +535,10 @@ python detector_headless.py
 ```
 
 完走に数分〜十数分かかります（約600本×数日分のデータ取得と曲線あてはめ）。
+
+> **CCG・イオンポンプ・温度計(LER)・温度計(HER) は同時に kblogrd へアクセスすると負荷が集中するため、
+> `STAGE_STAGGER_SEC`（`detector_headless.py` 冒頭の定数、既定 **5分**）ずつ段階的にずらして実行します**
+> （CCG → 待機 → イオンポンプ → 待機 → 温度計LER → 待機 → 温度計HER）。0にすれば従来どおり即時連続実行に戻せます。
 
 > **`--watch` は `nohup` を付けず、フォアグラウンドで動かすことを推奨します。**
 > `nohup ... &` でバックグラウンドに回すと、**動いていることが画面から見えなくなり、
@@ -497,6 +640,7 @@ CCG が増減したら **CSV を更新するだけ**でよく、本体のソー�
 | 「既に PID xxxx で起動中」 | 二重起動防止。動いている方を使うか、止めてから起動。残骸ロックは次回起動時に自動掃除。 |
 | ポート使用確認 | `ss -ltnp | grep 18050`。 |
 | 検知が `could not convert string to float: '攀'` / `chr() arg not in range` で異常0件 | 複数ホスト同時実行による共有ファイル破損。下の「複数ホスト同時実行による破損」を参照。検知は1ホストに固定する。 |
+| 温度計/機器劣化/流量計タブに「⚠ アーカイバ(kblog)が…停止中」バナーが出る・バッジが「停止中」 | 故障ではない。シャットダウン期間等でアーカイバが該当PVの記録を止めている（判定に使うデータ自体が無い）状態。アーカイバ復旧後の次回判定サイクルで自動的に通常表示に戻る。過去期間で判定ロジックだけ確認したい場合は `flow_headless.py --once --end <過去日時>` などが使える（第II部 15 章）。 |
 
 ### 複数ホスト同時実行による破損（重要・再発防止）
 
@@ -585,10 +729,11 @@ cd ~/skbva_anomaly_detector              # 以下すべてこのディレクト�
 # --- ダッシュボード ---
 python dashboard.py                      # 前景起動（ターミナルを閉じると止まる）
 nohup python dashboard.py >& dashboard.log &   # 常駐（ログアウトしても継続）
+python dashboard.py --port 18077         # 本番を止めずに別ポートでデモ確認（RECORD_RAW_DEMO=1と併用）
 pkill -f dashboard.py                    # 止める
 
 # --- 検知（実機のみ。EPICS/kblogrd 必要） ---
-python detector_headless.py --once       # 1回だけ
+python detector_headless.py --once       # 1回だけ（CCG+IP+温度計）
 python detector_headless.py --watch      # アボートトリガ常駐（推奨：前景。停止は Ctrl-C）
 #   nohup ... & は二重起動に気づきにくいため非推奨。常駐は tmux/screen 内で前景実行を推奨。
 #   起動前に各ホストで ps -u <user> | grep -i python して既存検知が無いことを確認。
@@ -597,10 +742,35 @@ pkill -f detector_headless.py            # 止める
 # --- 表示用 JSON を作り直す（検知を回さないとき手動で） ---
 python state_builder.py
 
-# --- イオンポンプ放電電流の異常判定（運用中。kblogrd 必要） ---
+# --- イオンポンプ放電電流の異常判定（運用中。kblogrd 必要。既定は固定モデル方式） ---
 python ip_judge.py learn LER <健全開始> <健全終了> --interval 300 --robust --out ip_models.json  # 初回だけ（両リング）
 python detector_headless.py --ip-judge             # judge を1回（ip_judge_state.json 等を更新）。--watch 中は4hごと自動
+python detector_headless.py --ip-judge --hours 72  # 判定窓を変えたいとき（既定24h）
 python ip_judge.py selftest                        # 合成データで層・フィットを検証（kblogrd 不要）
+
+# --- 温度計異常検知（temp_detector/。kblogrd 必要。CCG式ローリング基準、固定モデル不要） ---
+python detector_headless.py --temp-judge           # judge を1回（temp_dashboard_state.json 更新）。--watch 中は4hごと自動
+cd temp_detector && python temp_batch.py run HER --rolling --hours 24   # 手元で個別に確認したいとき
+cd temp_detector && python temp_headless.py --once # cron 向け単発実行（下記参照）
+# crontab 例（4時間おき）:
+#   0 */4 * * *  cd ~/skbva_anomaly_detector/temp_detector && python temp_headless.py --once >> temp_headless.log 2>&1
+cd temp_detector && python temp_pv.py && python temp_judge.py && python temp_fetch.py selftest && python temp_batch.py selftest  # kblogrd不要の自己テスト一式
+
+# --- 機器劣化検知（temp_equipment.py。センサ故障ではなく測定対象の熱結合の劣化。全リング対応） ---
+cd temp_detector && python temp_equipment.py learn IR 20220501000000 20220622090000 --model hom  # 過去の健全期間を学習
+cd temp_detector && python temp_equipment.py judge IR 20260301000000 20260401000000               # 直近と比較（--model省略時は自動判定）
+python detector_headless.py --equipment-judge      # judge を1回（learn済み全リングをtemp_equipment_state.json に更新）。
+                                                    # 既定では --watch/--once/定期ループにも1日おきで自動相乗り
+cd temp_detector && python temp_equipment.py judge-all   # 上と同じことを detector_headless.py 無しで手元確認したいとき
+cd temp_detector && python temp_equipment_plot.py IR 20260301000000 20260401000000                # 比較散布図を出力
+cd temp_detector && python temp_equipment.py selftest                                              # kblogrd不要の自己テスト
+
+# --- 流量計異常検知（flow_detector/。ビーム電流と無関係。リング概念無し・直近窓だけの絶対閾値判定） ---
+python detector_headless.py --flow-judge           # judge を1回（flow_dashboard_state.json 更新）。--watch 中は4hごと自動
+cd flow_detector && python flow_headless.py --once # cron 向け単発実行（下記参照）
+# crontab 例（4時間おき）:
+#   0 */4 * * *  cd ~/skbva_anomaly_detector/flow_detector && python flow_headless.py --once >> flow_headless.log 2>&1
+cd flow_detector && python flow_pv.py && python flow_fetch.py selftest && python flow_judge.py  # kblogrd不要の自己テスト一式
 
 # --- 確認系 ---
 python -c "import keras, tensorflow; print(keras.__version__, tensorflow.__version__)"  # 2.13系か確認
@@ -761,7 +931,7 @@ python ip_state.py 20260610000000 20260611000000
 
 ### 判定の層（L0a / L0b / L1 / L2、＋ビーム軸）
 これらは**独立した判定ルール**に番号を振ったもので、ニューラルネットの層ではない（値を伝播せず、
-最後に OR で束ねる。§15 用語集参照）。
+最後に OR で束ねる。§17 用語集参照）。
 | 層 | 内容 | モデル要否 | 主対象 |
 |----|------|-----------|--------|
 | **L0a 無ビーム放電** | ビーム電流が低い/無い期間にガス負荷が無いのに電流が高い → 放電。CCG にも I-P にも依存せず最も頑健 | 不要 | 両電源 |
@@ -821,10 +991,15 @@ python ip_state.py 20260610000000 20260611000000
   decoupled の誤検知抑制、acute/chronic ラベル（`kind`/`deviation_dex`）。
 - 済: **ビーム軸格下げ**（無ビーム挙動 drop_dex/nb_excess_dex/r_beam でビーム由来 sev3 を sev1 に格下げ。
   既知故障 D03_IP_L09 等は保護）。
-- 済: `dashboard` への judge 結果の載せ込み（**イオンポンプ専用セクション**、sev3 のみ表示＋acute/chronic
-  バッジ＋「N 回連続」バッジ＋逸脱量、急性を上にソート、**右側にカウント推移プロット**（Anomaly Count /
-  Judge Cycle）、カードクリックで**電流 vs 時刻**（無ビーム網掛け・学習バンド）と**I-P 散布図**（縦軸
-  放電電流 [A]・`I=a·P^b` 回帰を実測点と同じ赤で重ね描き）を表示）。
+- 済: `dashboard` への judge 結果の載せ込み（**イオンポンプ専用タブ**、sev1/sev2/sev3 すべて表示＋
+  acute/chronic バッジ＋「N 回連続」バッジ＋逸脱量、急性を上にソート、**右側にカウント推移プロット**
+  （Anomaly Count / Judge Cycle）、カードクリックで**電流 vs 時刻**（無ビーム網掛け・学習バンド）と
+  **I-P 散布図**（縦軸放電電流 [A]・`I=a·P^b` 回帰を実測点と同じ赤で重ね描き）を表示）。
+- 済: **ローリング基準（オプション、既定オフ）**。`detector_headless.py` の `IP_JUDGE_ROLLING=True` に
+  すると、CCG/温度計と同じく judge のたびに直近数日（既定8〜5日前）から健全モデルを作り直す
+  （`ip_models_rolling.json`）。ただし実機確認の結果、放電フィット `I=a·P^b` は3日程度の基準窓では
+  圧力レンジ変動が不足し、本来検知できるはずの放電を見逃す事例が出たため、**既定は固定モデル方式
+  （`False`）**。固定モデルより最新の状況を反映したい場合のみ有効化を検討する。
 - 未: `cause_infer.py` への I・P・ビーム 3 点測量の受け渡し（放電／排気劣化／CCG 故障／正常高負荷の切り分け）。
 
 #### judge 結果をダッシュボードに出す手順（自動）
@@ -838,14 +1013,14 @@ python ip_state.py 20260610000000 20260611000000
 `state_builder.py` がそれを `ion_pump_anomalies` / `ip_sections` として取り込み、
 ダッシュボードのイオンポンプ異常モニターに反映する。
 
-**表示ゲート（sev3 のみ・継続したものだけ）**：judge は毎サイクル多数のポンプを sev1〜3 で
-拾うが、ダッシュボードのカードには **sev3 が `IP_MIN_COUNT` サイクル以上続いたものだけ** を出す
-（CCG 同様、単発で大量に出さない）。仕組みは累積カウント：あるポンプが sev3 のサイクルで +1、
-そうでなければ −1（下限0）。カウントは `ip_judge_counts.json` に保存され、各カードに「N 回連続」
-バッジで表示される。閾値は `state_builder.py` の `IP_MIN_SEV`(=3) / `IP_MIN_COUNT`(=2)。
-すぐ確認したいときは `--ip-judge` を2回叩けばカウントが 2 に達して出る（同じ24h窓を2回判定）。
-sev1/sev2（4U の「相関崩れ」「排気劣化」等）はカードには出さない（誤検知抑制）。さらに、ビーム由来と
-判定された sev3 は**ビーム軸で sev1 へ格下げ**され（上記）、同様にカードから外れる。
+**表示ゲート（sev1/2はそのまま・sev3は継続したものだけ）**：judge は毎サイクル多数のポンプを
+sev1〜3 で拾う。ダッシュボードのカードには **sev0（正常）以外は基本すべて出す**が、**sev3 だけは
+`IP_MIN_COUNT` サイクル以上続いたものに絞る**（単発の判定ノイズで sev3 バッジが暴れないようにする
+ため。CCG 同様の考え方）。仕組みは累積カウント：あるポンプが sev3 のサイクルで +1、そうでなければ
+−1（下限0）。カウントは `ip_judge_counts.json` に保存され、各カードに「N 回連続」バッジで表示される。
+閾値は `state_builder.py` の `IP_MIN_SEV`(=3) / `IP_MIN_COUNT`(=2)。すぐ sev3 を確認したいときは
+`--ip-judge` を2回叩けばカウントが 2 に達して出る（同じ24h窓を2回判定）。ビーム由来と判定された
+sev3 は**ビーム軸で sev1 へ格下げ**され（上記）、sev1側の表示（そのまま出る）に回る。
 
 **判定結果の保存先**：`ip_judge_state.json`（各ポンプの severity / kind / deviation_dex /
 reason / count、ビーム軸の `beam_driven` / `severity_raw` / `metrics` を含む全結果）、
@@ -893,7 +1068,346 @@ python ip_judge.py learn HER 20260125000000 20260126140000 --interval 300 --robu
 
 ---
 
-## 14. 参考文献
+## 14. 拡張：温度計異常検知（`temp_detector/` / 運用中）
+
+ビームパイプ本体の温度計（LER 1550本／HER 1260本、`VA{L,H}TMP:...` 形式）に加え、IR（衝突点周辺）
+のフォーカス磁石温度計（12本、`FB_MOVE:...` 形式）のセンサ自己故障（断線・短絡・接触不良等）を検知する。
+**CCG/IP とは独立した自己完結パッケージ**（`temp_detector/` 配下、CCG/IPのコードに依存しない）。
+
+### PV 形式（2種類）
+
+- **(A) ビームパイプ本体**（ログ群 `VA/VATemp`）：`VA{L,H}TMP:{センサID}:{位置タグ}:{付帯}`
+  （例 `VAHTMP:D10_139:QD3E_11:BL`）。ring は接頭辞（VAL=LER/VAH=HER）から一意に決まる。
+- **(B) IR センサ**（ログ群 `BM/BMOthers`）：`FB_MOVE:{D01|D02}:{QC1H|QC1L}[連番][:BWS[2]]:TEMP`
+  （例 `FB_MOVE:D01:QC1L:BWS:TEMP`）。ビームリングは tag の H/L（H=HER, L=LER）から自動推定する。
+
+**リング所属の例外**（配線間違い・一時的な物理移設等）は `pv_info/TEMP_RING_OVERRIDE.csv` で
+上書きできる（コード変更不要、2列CSV `PV,ring` を編集するだけ）：
+
+```csv
+PV,ring
+FB_MOVE:D02:QC1H:BWS:TEMP,LER          ← 配線間違い（実際はLER設置）
+VAHTMP:D10_139:QD3E_11:BL,LER          ← 例: HER温度計を一時的にLERへ物理移設
+```
+PV名（アーカイブ上の取得先）自体は変わらないため、取得は常に元のリング側 `<RING>_TEMP_PV.csv`
+から行われる（`natural_ring`。上書きは判定・ビーム相関に使う実効 `ring` のみに効く）。
+
+### 検知の層
+
+| 層 | 検知するもの | 概要 |
+|---|---|---|
+| H0 | 断線（非現実高温）/ 低温 | 絶対レンジ（既定 -40〜400℃）を外れたら sev3、レンジ接近は sev1 |
+| H1 | 張り付き | 窓内で値が変化しない（分解能未満）→ sev2 |
+| S | 短絡疑い | 窓内でサブ常温（≤10℃）が持続 → sev3。ビーム非依存・モデル不要（実機に常温以下が平常のセンサは無いと確認済み） |
+| O | 無ビーム高温（near-open/高抵抗） | 無ビーム点の温度が一定割合アンビエント超過で持続 → sev3。ビーム発熱による正常高温とは無ビーム条件で区別 |
+| N | ノイズ増大 | 差分の分散が学習ノイズ帯を超過 → sev2 |
+| G | グリッチ（反転スパイク） | 1点だけ跳ねて戻る反転（前後とも急変・符号が逆）→ sev2。なめらかなビーム連動スイングは含めない |
+| B | ビーム反相関 | 温度-ビーム相関が強い負（無ビームで温度上昇）→ sev2。非物理なパターン |
+| I | 間欠逸脱 | 稀だが繰り返す極端値（持続ではない）→ sev2 |
+| P | 上下ペア乖離 | 対センサとのΔTが学習値から乖離（一部センサのみ存在） |
+
+### 基準の方式：CCG式ローリング（IPとは異なる）
+
+温度計は**中央値＋ノイズ帯**という単純な統計量のみを使うため、短い基準窓（既定8〜5日前の3日間）
+でも安定して学習できる。よって**CCGと同じローリング基準**（判定のたびに基準窓を学習し直す）が既定。
+固定モデルファイルの保存・陳腐化管理は不要（IPの回帰フィット `I=a·P^b` とは異なり、圧力/電流レンジの
+変動を必要としないため）。
+
+### 使い方
+
+```bash
+cd temp_detector
+# 全台バッチ判定（手元で個別に確認したいとき）
+python temp_batch.py run HER --hours 24 --rolling --top 40
+python temp_batch.py run HER --start 20260625000000 --end 20260627000000  # 期間を直接指定
+python temp_batch.py list-low HER            # 学習中央値が低いセンサ一覧（常温以下が平常か確認）
+
+# 定期実行（cron 推奨、または常駐ループ）
+python temp_headless.py --once               # cron 向け単発実行
+python temp_headless.py --interval-hours 4    # 常駐ループ
+
+# 特定センサの波形・判定を見る較正/診断ツール
+python temp_probe.py HER D01M095 20260615000000 20260618000000 600
+
+# selftest（kblogrd 不要）
+python temp_pv.py && python temp_judge.py && python temp_fetch.py selftest && python temp_batch.py selftest
+```
+
+`detector_headless.py` の検知サイクルにも相乗りしており（`--watch`/`--once`/定期ループいずれも）、
+`--temp-judge` で単体実行もできる（第II部 7 章）。結果は `temp_detector/temp_dashboard_state.json`
+に書かれ、ダッシュボードの「温度計異常検知」タブがこれを読む。
+
+**アーカイバ停止の検知**：`temp_headless.py` は、PVリストは読めているのに判定できたPVが
+0本（`stats.n_judged == 0`）の場合、個々のセンサ故障ではなく**アーカイバ(kblog)自体がデータ
+取得を停止している**と判断し、その旨を `archiver_stopped: true` としてリングごとにJSONへ記録する
+（シャットダウン期間など、アーカイバが動いていない間の運用を想定）。ダッシュボードはこのフラグを
+見て、通常の異常表とは別に警告バナーを表示する（「異常なし」と誤解されないようにするため）。
+
+**クリック展開プロット**：異常（sev≥1、保存対象=上位top件）のPVには、判定窓の間引き時系列
+（`plot: {t, temp, beam}`、400点以下）がJSONに埋め込まれ、ダッシュボードで行をクリックすると
+温度＆ビーム電流の時系列グラフが表示される。judge時点でメモリ上にあるデータをそのまま使う
+ため、**クリック時のkblogrd再取得は発生しない**（正常PVには付けないのでJSONサイズも異常件数に
+比例した分だけで済む）。欠測（NaN）はnullとして埋め込まれ、グラフでは線が途切れて描かれる。
+
+ここまでの層（H0〜P）は「**センサ自体**の故障」を見る。`temp_equipment.py` は逆に、**センサは
+正常な前提で、測定対象の機器側の熱結合の劣化**（放熱不良・断熱劣化・接触不良による発熱増加等）
+を検知する、別の判定軸のツール。**IRセンサに限らず、LER/HER 本体センサ（`VA{L,H}TMP` 形式）も
+含め、全リング・全PVで同じように使える**（PV形式ごとの分岐は内部で吸収されるため、呼び出し側は
+ring を `LER`/`HER`/`IR` のどれにするか選ぶだけでよい）。
+
+**着眼点**：健全な機器なら、同じビーム電流に対する温度上昇（dT/dI）はほぼ一定のはず。これが
+過去の基準期間と比べて有意に増えていたら、機器側の熱的な劣化を疑う。実例（IR:
+`FB_MOVE:D01:QC1L:BWS:TEMP`）では、2022年基準期間 dT/dI≈4.7℃/A に対し 2026年は≈7.9℃/A（比
+1.68倍）で検出。
+
+**2つのフィットモデル**（`--model` で選択）：
+
+| モデル | 式 | 備考 |
+|---|---|---|
+| `linear` | `T = a + b·I` | Theil-Sen 頑健回帰。傾き `b`(dT/dI) の比で判定。Nb取得不要の簡易版 |
+| `hom`（既定） | `T = w0 + w1·I + w2·(I²/Nb)²` | Suetsugu et al., PRAB **27**, 063201 (2024) 式(5)と同形（CCG圧力の式をそのまま温度に適用）。バンチ数 `Nb` の取得が必要（`temp_fetch.fetch_nb`、ログ群 `Misc/Base`、PV `CGLINJ:BKSEL:NOB_SET`/`CGHINJ:BKSEL:NOB_SET`。CSV読み込み時は列名に `NOB`/`BKSEL`/`BUNCH` のいずれかを含む列を自動検出） |
+
+`hom` の「二乗」は本来、圧力側の熱脱離物理（Arrhenius近似 `ΔPt∝(ΔT)²`）に由来するもので、温度
+そのものへの適用は必ずしも自明ではない（二乗なし版 `fit_t_vs_i_hom_linear` も用意。実データで
+当てはまり(R²)を比較して判断するとよい）。実際に検証したところ両モデルとも R²=0.93〜0.99 と
+良好で、`hom` の方が実データの非線形な立ち上がりをよく捉える傾向があった。
+
+**フィットに使う点の絞り込み**（2段階、両方とも既定で有効）：
+1. **ビームあり点のみ**（`beam_on_ma`、既定50mA以上）。CCGの Storage 解析（フィル中のみを見る）
+  と同じ考え方。
+2. **電流急変直後の熱の過渡（サーマルラグ）を除外**（`settle_after_change_min`＝直近何分を見るか、
+  既定20分／`settle_change_ma`＝その間の変動幅がこれ以上なら過渡とみなす、既定200mA）。アボート
+  による急落・フィル開始や電流アップによる急上昇のどちらの方向でも、電流が変わってから機器の
+  温度が実際に落ち着くまでには熱容量による遅れがあるため、その間の点は「今の電流に対する定常的
+  な温度」ではない。CCG論文の Storage/Tail の区分と同じ発想を、方向を問わず一般化したもの。
+  **`settle_after_change_min` は機器ごとの実際の熱時定数に合わせて調整が必要**（既定20分で
+  不十分なら、プロットを見ながら30分・45分などに伸ばす）。
+
+**learn / judge の2段構成**（IPと同じ思想。機器の熱結合特性は年単位でしか動かない量なので、
+CCG/温度計センサ判定のような「毎回直近数日を学習し直す」ローリング基準は使わず、明示的に選んだ
+過去の健全期間を一度学習してモデルを保存する）：
+
+```bash
+cd temp_detector
+
+# ① 過去の健全期間を学習（--model 省略時は既定で hom＝式(5)型。--model linear で簡易版に切替可）
+python temp_equipment.py learn IR 20220501000000 20220622090000 --model hom
+
+# ② 直近を学習済みモデルと比較（--model 省略時は保存済みモデルの種別を自動判定）
+python temp_equipment.py judge IR 20260301000000 20260401000000
+
+# LER/HER 本体センサも同様（PV数が多い＝1550/1260本なので、まず --pv で1本に絞って試すのが安全）。
+# ビーム/Nbはリング共通なので、PV本数によらず最大2回（LER/HER分）しか取得し直さない。
+# 温度自体も26本ずつまとめて1回のkblogrd呼び出しで取得する（temp_fetch.fetch_historyのCHUNK
+# 機能をそのまま使う）ので、kblogrd呼び出し回数は概ね「PV本数÷26」で済む（1本ずつ呼ぶより
+# 大幅に少ない。呼び出し1回あたりの接続オーバーヘッドが効くため、本数が多いほど効果が大きい）。
+# 既定値26は、元のCCG用.sh（legacy/HERD01CCG.sh等）がD01のCCG27本を14本+13本に手分けして
+# いたのを踏襲した「13」から、実機で26本一括取得も問題なく動作したことを確認して引き上げた値
+# （kblogrd自体に本数の上限が確認されているわけではない）。さらに増やせるか試したい場合は
+# 環境変数 TEMP_KBLOGRD_CHUNK で上書きできる（コード変更不要）。段階的に試すのを推奨
+# （kblogrd側の未知の上限に備え、いきなり大きくしない）:
+#   実機は tcsh なので "VAR=val command"（bash風）は使えない。env 経由か setenv を使う:
+#   env TEMP_KBLOGRD_CHUNK=52 python temp_equipment.py learn HER 20220501000000 20220622090000 --model hom --match "D12"
+#   または: setenv TEMP_KBLOGRD_CHUNK 52 ; python temp_equipment.py learn HER ...
+python temp_equipment.py learn HER 20220501000000 20220622090000 --model hom --pv "VAHTMP:D10_139:QD3E_11:BL"
+python temp_equipment.py judge HER 20260301000000 20260401000000 --pv "VAHTMP:D10_139:QD3E_11:BL"
+# 1本で確認できたら --pv を外す（または --match でセクション等を絞る）ことでリング全体に広げられる
+python temp_equipment.py judge HER 20260301000000 20260401000000
+
+# 比較の詳細（R^2 込み）を1本だけ見る／変化ログCSVからのオフライン検証にも対応
+python temp_equipment.py compare IR "FB_MOVE:D01:QC1L:BWS:TEMP" --model hom \
+  --ref-csv 2022.csv --now-csv 2026.csv         # または --ref-start/--ref-end で実機取得
+
+# モデル保存なしで1回だけざっと洗い出したいとき（learn不要の簡易版）
+python temp_equipment.py scan IR 20220501000000 20220622090000 20260301000000 20260401000000
+
+# 比較散布図（温度 vs ビーム電流、基準/現在を重ね描き。--model 省略時も自動判定）
+python temp_equipment_plot.py IR 20260301000000 20260401000000
+
+# selftest（kblogrd 不要）
+python temp_equipment.py selftest
+```
+
+`judge` の出力は sev1〜3・比・代表点での予測発熱量・両期間の R² を表示する。**代表点は
+両期間それぞれの実データ範囲の共通部分にクリップ**しており、データ量や電流域が違う期間同士を
+比較しても外挿にならないようにしてある。
+
+**判定は「ビーム電流ゼロの温度（環境温度）」の影響を受けない設計**：本当に検知したいのは
+「同じビーム電流に対してどれだけ発熱するか」の変化であって、季節・空調等で環境温度自体が
+変わることではない。`linear` モデルは切片 `a`（＝I=0での温度）を使わず傾き `b`（dT/dI）だけで、
+`hom` モデルは切片 `w0` を除いた `w1·I + w2·(I²/Nb)²`（＝発熱分のみ）で比較しており、どちらも
+環境温度の変化そのものは判定に影響しない（selftest で「環境温度だけが大きく変わり、真の熱結合
+特性は同一」というケースが sev0 のままであることを回帰テストとして確認している）。ただし
+`judge` の出力には参考情報として切片差（`linear`=Δa、`hom`=Δw0）も表示されるので、環境温度が
+実際どれくらい動いたかは目視で確認できる。
+
+**同一エリアでの一括検知への注意**：同じセクション（例 D01）の多数のPVが同時に sev3 になった
+場合、`judge` が自動で警告を出す。個々の機器が独立に劣化するより、季節変化・空調・その周辺の
+改修・センサ較正の変更など**共通要因**を疑うべきサインであることが多い（実データで実際に
+D01エリア6本が同時検知され、運用者側で「基準期間と直近の間に温度計周りで変更があった」ことが
+裏付けられた）。切片差(Δa/Δw0)も参考表示されるので、周囲温度シフトか機器結合そのものの変化かの
+見立てに使える。
+
+`temp_equipment_plot.py` は温度 vs ビーム電流の散布図を基準/現在で重ね描きし、`--model` 未指定
+なら PV ごとに保存済みモデルの種別・学習期間を自動判定する。各期間のフィット曲線はその期間で
+実際に観測された電流範囲までしか描かない（データの無い領域への外挿を避けるため）。図中の文字は
+すべて英語（実機に日本語フォントが無い環境があるため。`ip_observe.py` と同じ方針）。
+
+**ダッシュボード連携・`detector_headless.py` 連携**：ここまでは手元での `learn`/`judge` の
+使い方だが、実運用では CCG/IP/温度計センサと同じく `detector_headless.py` の検知サイクルに
+相乗りさせ、ダッシュボードの「機器劣化検知」タブ（第I部 3 章）で見る。
+
+- `run_periodic_judge()`（`temp_equipment.py` 内）が、**learn は行わず**保存済みモデル
+  （`temp_equipment_models.json`）との judge だけをリングごとに回し、`temp_equipment_state.json`
+  を書く。まだ `learn` していないリングは自動的にスキップされる（エラーにはならない）ので、
+  例えば「IRだけ運用中、LER/HERは未着手」という段階的な導入でも安全に動く。
+- `detector_headless.py` 側は `run_equipment_judge`/`_maybe_run_equipment_judge` として
+  CCG/IP/温度計と同じ相乗り方式で配線されており、`--watch`/`--once`/引数無しの定期ループの
+  いずれでも自動的に実行される。ただし機器の熱結合特性は年単位でしか動かない量なので、
+  既定の実行間隔は **1日ごと**（`EQUIPMENT_JUDGE_EVERY_SEC`、CCG/IP/温度計の4hよりずっと緩い）
+  にしてあり、実機負荷はほぼ無視できる。
+- 単体実行・初回投入・動作確認には `python detector_headless.py --equipment-judge`
+  （`temp_equipment_state.json` を即時更新）が使える。`detector_headless.py` を経由せず
+  手元だけで同じことを試したい場合は `cd temp_detector && python temp_equipment.py judge-all`
+  でも同じ結果になる（`judge-all` は `run_periodic_judge` をそのまま呼ぶ薄いCLIラッパー）。
+- `dashboard.py` は `temp_detector/temp_equipment_state.json` を読み、「機器劣化検知」タブに
+  リングごとの判定結果を表示する。未学習のリングは「未学習のためスキップ」と表示されるだけで、
+  他のリング・他のタブの動作には影響しない（温度計異常検知タブが未実行時に案内文だけ出すのと
+  同じ設計）。learn済みリングでもjudge時点でアーカイバが停止していれば、温度計異常検知タブと
+  同じ`archiver_stopped`フラグで警告バナーを表示する。
+- **クリック展開プロット**：異常（sev≥1）のPVには、`judge(attach_plot=True)` が温度 vs ビーム
+  電流の散布データ（`plot: {ref, now, ref_fit, now_fit}`、各250点以下＋フィット曲線）をJSONに
+  埋め込み、ダッシュボードで行をクリックすると基準期間（薄青）と調査期間（赤）の散布＋フィット
+  曲線が表示される。`hom`型は判定のために基準期間の生データを毎回再取得するので基準側の散布点も
+  入るが、`linear`型は保存済みフィット係数（a_ref/b_ref）しか持たないため、基準はフィット直線
+  のみになる（グラフの注記にも表示される）。
+
+---
+
+## 15. 拡張：冷却水流量計異常検知（`flow_detector/` / 運用中）
+
+冷却水流量計の**センサ自身の異常**を検知する（実際の流量低下は別のアラームシステムが検知する
+ため対象外＝ユーザ確認済み）。運用上、これまでに実際の流量低下が起きたことは一度も無く、
+流量計自身の故障で指示値が下がってしまうケースが全て（分解清掃すれば指示値が元に戻る）との
+ことなので、**センサ側の異常予兆を事前に見つける**のが目的。
+
+**ビーム電流と無関係の機器**（CCG/温度計/機器劣化検知はいずれもビーム電流との関係が判定の
+軸になるが、流量計はそれが無い）なので、リング(LER/HER)の概念を持たず、判定は**直近1窓
+（既定24h）の指示値だけ**を固定閾値と比較する、他の拡張よりさらに単純な設計にしている
+（CCG式ローリング基準の別窓取得や、機器劣化検知のような固定モデルの学習は不要）。
+
+### PV 形式
+
+```
+VA_FLS:{section}_{idx}_{tag}:RATE
+  例) VA_FLS:D01_11_XXX:RATE, VA_FLS:D04_15_084:RATE
+```
+`section`=D01〜D12（CCG/温度計と同じセクション表記）、`idx`=セクション内の連番、`tag`=個体識別
+（3桁数字、または未割当を示す "XXX"）。PV名だけからは判別できないため、リングの概念自体を
+持たない（`flow_pv.py` は `temp_pv.py` と違い ring フィールドを返さない）。
+
+PVリストは `pv_info/FLOW_PV.csv`（1列目 PV、先頭行はヘッダ "FLOW PV"。CCG/温度計と同じ置き場・
+同じ形式）。678本、リング別ファイル分割は無い（1本のリストに全セクションがまとまっている）。
+
+**値の意味**：100% は「ある時点で取った基準流量と同じ流量が流れている」ことを表す固定の校正
+基準（ユーザ確認済み）。個体差はあるが、正常な流量計はおおむね90〜150%の範囲に収まる。
+
+### 判定の設計：実データに基づく絶対閾値方式
+
+CCG/温度計のようなローリング基準（同じセンサの数日前を再取得して比較）を持たない理由は、
+実測データ（正常参照7本 vs 異常確認済み4本、いずれも実機の記録）を分析した結果、**絶対的な
+閾値だけで十分に、かつ発症の初期から検知できる**ことが分かったため：
+
+| 指標 | 正常参照7本（実測） | 異常確認済み4本（実測） |
+|---|---|---|
+| 変動係数 CV（=std/mean, %） | 最大 2.18% | 8.2%〜44.2% |
+| 校正基準比に対する張り付き | 無し | 1本が間欠的に0.27〜0.31%に張り付き |
+
+異常な個体は記録期間の**最初の24hだけを切り出しても既に検知される**ことも確認済み（同じPVの
+過去の健全期間との比較を必要としない）。これにより「センサ自身の過去がすでに悪化していると
+検知が遅れる」というローリング基準特有の弱点（boiling frog問題）を回避できる。
+
+判定層（`flow_judge.py`。severityは初期値。閾値は運用しながら調整可能、との了承済み）：
+
+| 層 | 内容 | 閾値（既定） |
+|---|---|---|
+| `frozen` | 窓内の range(max−min) がほぼ0（値の固着） | range < 0.05% |
+| `stuck_low` | 窓のロバスト中央値が校正基準100%に対して大きく低下 | sev1: <75% / sev2: <40% / sev3: <15% |
+| `excess_noise` | 窓のCV（変動係数）が正常範囲を大きく超える | sev1: >4% / sev2: >8% / sev3: >15% |
+| `glitch` | 単発の外れ値（ロバストσの8倍超）の割合 | 記録のみ（severityには使わない） |
+
+severity は各層の最大値。`frozen` はCV計算自体が無意味になるため、frozen中は `excess_noise`
+層をスキップする。
+
+**実機データで判明した2点の補正**（6月の実データで `--once --end` 検証した際に発見・修正済み）：
+
+- `frozen`（値の固着）は当初「変化が無ければ即sev3」としていたが、678本規模で実機データを見ると、
+  校正基準比が**正常な範囲（例: 100〜130%）のまま**1日中まったく値が変化しないPVが16本も見つかった
+  （アーカイバの記録間隔が粗い、または本当に安定しているだけの可能性が高く、必ずしも故障では
+  ない）。実際の故障（`D10_02_010`）の本質は「近ゼロ値に張り付く」という**レベルの異常**であり、
+  「変化が無いこと」自体は補助的な追加証拠にすぎないと判断し、**校正基準比も低い場合のみ
+  `frozen_low`(sev3) とし、正常範囲での固着は `frozen_watch`(sev1・要注視のみ) に留める**よう修正した。
+- `glitch`（単発の外れ値）は当初「他の層が無ければsev1」としていたが、678本×24h規模では単発の
+  外れ値は統計的に一定数出るのが自然で、実機データでも28本がこれ単独でsev1になっており、
+  故障の証拠としては弱すぎると判断。**severityには使わず、詳細確認用の記録（`n_glitch`/`frac`）
+  としてのみ残す**よう修正した。
+
+### 使い方
+
+```bash
+cd flow_detector
+python flow_pv.py                                   # PV名パーサの自己テスト（kblogrd不要）
+python flow_fetch.py selftest                        # 取得部の自己テスト（kblogrd不要）
+python flow_judge.py                                 # 判定コアの自己テスト（合成データ、kblogrd不要）
+
+# 実機での取得+判定（1回だけ・cron向け）
+python flow_headless.py --once
+# crontab 例（4時間おき）:
+#   0 */4 * * *  cd ~/skbva_anomaly_detector/flow_detector && python flow_headless.py --once >> flow_headless.log 2>&1
+
+# 過去の特定期間を判定窓にして確認（--end で窓の終端を指定。アーカイバ停止中の動作確認や
+# 過去の既知の故障期間での閾値検証に使う。--once と併用すること）
+python flow_headless.py --once --end 20260604000000
+
+# 常駐ループとして起動する場合
+python flow_headless.py --interval-hours 4
+
+# detector_headless.py 経由（単体実行・初回投入・動作確認用）
+python detector_headless.py --flow-judge
+```
+
+**ダッシュボード連携・`detector_headless.py` 連携**：CCG/IP/温度計/機器劣化検知と同じく
+`detector_headless.py` の検知サイクルに相乗りする。`run_flow_judge`/`_maybe_run_flow_judge`
+として配線されており、`--watch`/`--once`/引数無しの定期ループのいずれでも自動的に実行される。
+既定の実行間隔は CCG/IP/温度計センサと同じ **4hごと**（`FLOW_JUDGE_EVERY_SEC`。機器劣化検知の
+1日ごとより頻度は高いが、ビーム電流と無関係・直近窓だけの軽い判定なので実機負荷は小さい）。
+`dashboard.py` は `flow_detector/flow_dashboard_state.json` を読み、「流量計異常検知」タブに
+判定結果を表示する（リング概念が無いため、他タブと違い `rings` ラッパーの無いフラットな構造）。
+
+**アーカイバ停止の検知**：PVリストは読めているのに全PVが `insufficient_data`（有効データが
+1点も取れていない）なら、個々のセンサ故障ではなく**アーカイバ(kblog)自体がデータ取得を停止
+している**と判断し、`archiver_stopped: true` としてJSONに記録する（温度計異常検知・機器劣化
+検知と同じ判定ロジック）。ダッシュボードはこのフラグを見て、警告バナーを表示する
+（シャットダウン期間中に「異常なし」と誤解されないようにするため）。
+
+**クリック展開プロット**：異常（sev≥1）のPVには、判定窓の間引き時系列（`plot: {t, v}`、
+400点以下）がJSONに埋め込まれ、ダッシュボードで行をクリックすると流量[%]の時系列グラフが
+表示される（温度計異常検知と同じ方式。judge時点のデータをそのまま使うため、クリック時の
+kblogrd再取得は発生しない）。値の固着・校正基準比の低下・指示値不安定のどのパターンかは
+グラフを見れば一目で分かる。
+
+### 要実機確認の項目
+
+- **kblogrd のログ群名**：`flow_fetch.py` の `LOG_GROUP` は `"VA/VAFlow"`（実機確認済み）。
+  環境変数 `FLOW_KBLOGRD_LOG_GROUP` でコード変更なしに一時的な上書きもできる。
+- **サンプリング間隔**：実アーカイブは5秒刻みだが、678本×24hのデータ量を抑えるため取得の既定
+  間隔は30秒にしている（`flow_fetch.DEFAULT_INTERVAL`）。閾値は実測5秒生データで較正したため、
+  間引きの影響（ノイズの見え方が多少変わる可能性）が気になる場合は `--interval 5` で実測条件に
+  合わせて確認できる。
+
+---
+
+## 16. 参考文献
 
 検知の方式（回帰モデル・特徴量・ニューラルネットによる正常/異常判定と原因推定）は、次の論文に基づいています。
 
@@ -901,10 +1415,14 @@ python ip_judge.py learn HER 20260125000000 20260126140000 --interval 300 --robu
   Phys. Rev. Accel. Beams **27**, 063201 (2024).
   DOI: [10.1103/PhysRevAccelBeams.27.063201](https://doi.org/10.1103/PhysRevAccelBeams.27.063201)
 
+機械学習まわりの用語・手法の背景説明は、次の書籍を参考にしています。
+
+- 伊藤真 著、『Pythonで動かして学ぶ！新しい機械学習の教科書 第３版』、翔泳社。
+
 
 ---
 
-## 15. 用語(Glossary)
+## 17. 用語(Glossary)
 
 このプロジェクトで出てくる用語の早見表。**機械学習特有の語はほとんど無く**、大半は統計・対数まわりの一般用語か、このプログラム内で便宜的に付けた名前です。とくに「層」はニューラルネットの層とは別物（下記）。
 
@@ -933,10 +1451,28 @@ python ip_judge.py learn HER 20260125000000 20260126140000 --interval 300 --robu
 - **abs_hard（絶対ハードシーリング）** — 履歴に依らず「この電流を超えたら無条件で異常」とする絶対値（既定 1e-5 A）。学習窓で既に壊れていた個体を拾うバックストップ。
 - **ip_trust** — そのポンプの I-P 関係が信用できるか（4U は基本 True、KEK は相関が偶発的なので慎重）。L1 下振れ・L2 圧力デカップリングの発火条件に使う。
 - **supply（電源種別）** — `KEK`（KEK 製電源、低圧フロア ~1e-7 Pa）と `Agilent_4U`（4U 電源、~1e-8 Pa、I∝P 相関が綺麗）。閾値やフロアを電源種別で切り替える。
+- **natural_ring / family（温度計）** — `natural_ring` は PV名から機械的に決まるリング（＝アーカイブ上どの
+  `<RING>_TEMP_PV.csv` に属するか）。`ring` は `TEMP_RING_OVERRIDE.csv` 適用後の実効リング（判定・ビーム
+  相関に使う）。両者を分けているのは、物理的に別リングへ移設してもPV名（取得先）は変わらないため。
+  `family` は `"IR"` のとき FB_MOVE（衝突点周辺）センサであることを示す。
+- **ローリング基準（rolling baseline）** — 固定モデル（一度学習して使い続ける）とは対照的に、判定のたびに
+  直近数日（既定8〜5日前の3日間）を学習し直す方式。CCG・温度計は既定でこちら、イオンポンプは既定オフ
+  （固定モデル方式）。回帰フィットが必要な判定は短い基準窓だと不安定になりやすい（イオンポンプの節参照）。
+- **STAGE_STAGGER_SEC** — `detector_headless.py` の検知サイクル内で、CCG→イオンポンプ→温度計→
+  機器劣化→流量計 の各 judge の間に挟む待機時間（既定5分）。kblogrd/EPICS への同時アクセス
+  負荷を分散するため（温度計内部の LER→HER の間にも同じ待機が入る）。
+- **CV（変動係数, coefficient of variation）** — std/mean。流量計異常検知で「指示値の不安定さ」を
+  測る指標（%）。正常な流量計は実測で最大2.2%程度、故障個体は8%〜40%超（第II部 15 章）。
+- **校正基準比（流量計）** — 流量計PVの値そのもの（%）。100% = ある時点で取った基準流量と同じ
+  流量が流れている状態。正常個体でも87〜151%の個体差はあるが、大幅な低下（例: 15%未満）は
+  ほぼ確実にセンサ側の異常（実流量がそこまで落ちることは運用上無いため）。
+- **archiver_stopped** — 温度計・機器劣化・流量計の各判定が状態JSONに書くフラグ。PVリストは
+  読めているのに全PVで有効データが1点も取れないとき true（アーカイバ(kblog)がデータ取得を
+  停止している状態。シャットダウン期間など）。ダッシュボードはこれを見て警告バナーを表示する。
 
 ### 補足：CCG 側との違いと「機械学習か否か」の線引き
 
-末次さんの **CCG 圧力検知は FNN（ニューラルネット）** を使う（§2-3, §14）。一方 **イオンポンプ
+末次さんの **CCG 圧力検知は FNN（ニューラルネット）** を使う（§2-3, §16 参考文献）。一方 **イオンポンプ
 `ip_judge` は、ニューラルネットのような複雑な機械学習モデルは使わず**、各ポンプの正常範囲を
 統計的に当てはめ（ロバスト回帰・パーセンタイル）たうえで、固定ルールで外れを検知している。
 
