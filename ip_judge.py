@@ -716,8 +716,14 @@ def _json_default(o):
 
 
 def _save_models(store, path):
-    with open(path, "w", encoding="utf-8") as f:
+    """モデルファイルを原子的に置き換える（tmp書き込み→os.replace）。
+    --watch 実行中に learn で ip_models.json を更新しても、judge 側が読んでいる
+    最中に壊れた（書きかけの）JSONを掴むことがないようにするため
+    （temp_equipment.py の _save_models と同じ安全策。以前はこの対策が無かった）。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(store, f, ensure_ascii=False, indent=1, default=_json_default)
+    os.replace(tmp, path)
 
 
 # ───────────────────────── 合成データ自己検証 ─────────────────────────
