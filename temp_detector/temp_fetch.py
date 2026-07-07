@@ -48,7 +48,11 @@ CHUNK = int(os.environ.get("TEMP_KBLOGRD_CHUNK", 26))
     # bashなら env TEMP_KBLOGRD_CHUNK=52 python ...）。段階的に増やして動作・所要時間を
     # 確認するのを推奨（kblogrd側の未知の上限に備え、いきなり大きくしない）。
 DEFAULT_INTERVAL = 300       # サンプリング間隔[秒]。本数が多く温度は緩慢なので長め（5分）
-TIMEOUT = 120                # kblogrd 1回あたりのタイムアウト[秒]
+TIMEOUT = int(os.environ.get("TEMP_KBLOGRD_TIMEOUT", 300))
+                            # kblogrd 1回あたりのタイムアウト[秒]。既定300s（旧120sではlearnの
+                            # 数週間規模の窓取得でTimeoutExpiredが実機で発生したため延長。
+                            # 詳細はip_fetch.pyの同種の修正コメント参照）。
+                            # 環境変数 TEMP_KBLOGRD_TIMEOUT でコード変更なしに上書き可
 
 # kblogrd が「指定 record 名がアーカイブに無い」ときに stderr に出す目印。
 # 過去窓では当時未設置/改名/撤去の PV が現行 CSV に含まれて出る。該当 PV を落として続行する。
@@ -199,7 +203,9 @@ def parse_kaleida(text, pvs):
 
 
 def _kblogrd_once(pvs, ttime, log_group, kblogrd):
-    """kblogrd を1回実行し (rc, stdout, stderr) を返す。stdin は閉じ、TIMEOUT で打ち切る。"""
+    """kblogrd を1回実行し (rc, stdout, stderr) を返す。stdin は閉じ、TIMEOUT で打ち切る。
+    タイムアウト時は rc=None を返す（raise しない。_fetch_chunk が二分探索で再試行できる
+    ようにするため。ip_fetch.py と同じ方針）。"""
     cmd = [kblogrd, "-r", ",".join(pvs), "-t", ttime, "-f", "kaleida", log_group]
     try:
         res = subprocess.run(cmd, stdin=subprocess.DEVNULL,
@@ -210,6 +216,8 @@ def _kblogrd_once(pvs, ttime, log_group, kblogrd):
             "kblogrd が見つかりません: %s\n"
             "温度の取得は kblogrd のある実機（kekb-co-user01/02/03）で実行してください。"
             "手元では `python temp_fetch.py selftest`（kblogrd 不要）で確認できます。" % kblogrd)
+    except subprocess.TimeoutExpired:
+        return None, "", ""
     return res.returncode, res.stdout, res.stderr
 
 
@@ -219,6 +227,10 @@ def _fetch_chunk(pvs, ttime, log_group, kblogrd, dropped_out=None, _depth=0):
     kblogrd は1本でも存在しない record があるとチャンク全体を失敗させるため、
     stderr から犯人を特定して落とすか、特定できなければ二分探索で1本単位まで隔離して落とす
     （ip_fetch と同じ方針）。落とした PV は dropped_out に追記。不一致以外の失敗は raise。
+
+    タイムアウト（rc=None）も同じ二分探索で対処する（本数を減らせば完走することがあるため）。
+    1本まで割ってもなおタイムアウトする場合は、期間そのものが重いということなので分かりやすい
+    エラーに変換する。
     """
     pvs = list(pvs)
     if not pvs:
@@ -226,6 +238,24 @@ def _fetch_chunk(pvs, ttime, log_group, kblogrd, dropped_out=None, _depth=0):
     rc, out, err = _kblogrd_once(pvs, ttime, log_group, kblogrd)
     if rc == 0:
         return parse_kaleida(out, pvs)
+
+    if rc is None:                          # タイムアウト
+        if len(pvs) == 1:
+            raise RuntimeError(
+                "kblogrd が %d 秒以内に応答しませんでした（PV 1本: %s, 期間 %s）。\n"
+                "本数を1本まで減らしても解消しないため、期間そのものが重いと考えられます。"
+                "対処法:\n"
+                "  1) 環境変数 TEMP_KBLOGRD_TIMEOUT でタイムアウトを延ばして再実行する"
+                "（例: env TEMP_KBLOGRD_TIMEOUT=900 python temp_equipment.py learn ...）\n"
+                "  2) 期間を短く区切って複数回に分けて取得する\n"
+                "  3) しばらく待って（アーカイバ/共用サーバーの負荷が下がってから）再実行する"
+                % (TIMEOUT, pvs[0], ttime))
+        mid = len(pvs) // 2
+        d = {}
+        d.update(_fetch_chunk(pvs[:mid], ttime, log_group, kblogrd, dropped_out, _depth + 1))
+        d.update(_fetch_chunk(pvs[mid:], ttime, log_group, kblogrd, dropped_out, _depth + 1))
+        return d
+
     if _NOMATCH_MARK not in (err or ""):
         raise RuntimeError("kblogrd 失敗 (rc=%d): %s" % (rc, (err or "").strip()))
 

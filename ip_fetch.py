@@ -26,7 +26,11 @@ LOG_GROUP = "VA/IPump"     # イオンポンプ電流のログ群（実機確認
 CHUNK = 13                 # 1回の kblogrd に渡す PV 数（CCG .sh の分割に倣う）
 DEFAULT_INTERVAL = 60      # サンプリング間隔[秒]
 NODATA = 1e-10             # kblogrd が「データ無し」に使う下限フラグ値
-TIMEOUT = 120              # kblogrd 1回あたりのタイムアウト[秒]
+TIMEOUT = int(os.environ.get("IP_KBLOGRD_TIMEOUT", 300))
+                            # kblogrd 1回あたりのタイムアウト[秒]。既定300s（旧120sではlearnの
+                            # 数日〜2週間規模の窓取得でTimeoutExpiredが実機で発生したため延長）。
+                            # 環境変数 IP_KBLOGRD_TIMEOUT でコード変更なしに上書き可
+                            # （例: env IP_KBLOGRD_TIMEOUT=600 python ip_judge.py learn ...）
 
 # kblogrd が「指定した record 名がアーカイブに無い」ときに stderr に出す目印。
 # 過去窓では当時未設置/改名/撤去の PV が現行 CSV に含まれて出る。該当 PV を落として続行する。
@@ -83,7 +87,10 @@ def parse_kaleida(text, pvs):
 
 
 def _kblogrd_once(pvs, ttime, log_group, kblogrd):
-    """kblogrd を1回だけ実行し (returncode, stdout, stderr) を返す。raise しない。
+    """kblogrd を1回だけ実行し (returncode, stdout, stderr) を返す。
+    タイムアウト時は returncode=None を返す（raise しない。呼び出し元の _fetch_chunk が
+    チャンクを半分に割って再試行できるようにするため。1本単位まで割ってもなお
+    タイムアウトする場合にはじめて _fetch_chunk 側で分かりやすいエラーに変換する）。
     stdin は閉じる（対話待ちでハングしないように）。TIMEOUT 秒で打ち切る。
     kblogrd が見つからない（実機以外で実行）場合は分かりやすいメッセージで中断する。"""
     cmd = [kblogrd, "-r", ",".join(pvs), "-t", ttime, "-f", "kaleida", log_group]
@@ -97,6 +104,8 @@ def _kblogrd_once(pvs, ttime, log_group, kblogrd):
             "実データの取得（learn/judge）は kblogrd のある実機 "
             "（kekb-co-user01/02/03）で実行してください。"
             "手元では kblogrd 不要の `python ip_judge.py selftest` のみ動きます。" % kblogrd)
+    except subprocess.TimeoutExpired:
+        return None, "", ""
     return res.returncode, res.stdout, res.stderr
 
 
@@ -105,7 +114,7 @@ def _run_kblogrd(pvs, ttime, log_group, kblogrd):
     頑健な取得は _fetch_chunk を使うこと。"""
     rc, out, err = _kblogrd_once(pvs, ttime, log_group, kblogrd)
     if rc != 0:
-        raise RuntimeError("kblogrd 失敗 (rc=%d): %s" % (rc, (err or "").strip()))
+        raise RuntimeError("kblogrd 失敗 (rc=%s): %s" % (rc, (err or "").strip()))
     return out
 
 
@@ -119,6 +128,11 @@ def _fetch_chunk(pvs, ttime, log_group, kblogrd, dropped_out=None, _depth=0):
       1) stderr に出た PV が要求チャンクに含まれればそれを落として再取得（軽い経路）。
       2) 特定できなければ二分探索でチャンクを割り、存在しない PV を1本単位まで隔離して落とす。
     落とした PV は dropped_out（list）に追記する。不一致以外の失敗はそのまま raise。
+
+    タイムアウト（rc=None）も同じ二分探索で対処する：本数を減らせば1回あたりの応答が
+    速くなり完走することがあるため（learn で長い期間×多PVを一度に取ろうとした際に実機で
+    確認）。1本まで割ってもなおタイムアウトする場合は、期間そのものが重いということなので
+    ここで諦めて分かりやすいエラーに変換する。
     """
     pvs = list(pvs)
     if not pvs:
@@ -126,6 +140,25 @@ def _fetch_chunk(pvs, ttime, log_group, kblogrd, dropped_out=None, _depth=0):
     rc, out, err = _kblogrd_once(pvs, ttime, log_group, kblogrd)
     if rc == 0:
         return parse_kaleida(out, pvs)
+
+    if rc is None:                          # タイムアウト
+        if len(pvs) == 1:
+            raise RuntimeError(
+                "kblogrd が %d 秒以内に応答しませんでした（PV 1本: %s, 期間 %s）。\n"
+                "本数を1本まで減らしても解消しないため、期間そのものが重いと考えられます。"
+                "対処法:\n"
+                "  1) 環境変数 IP_KBLOGRD_TIMEOUT でタイムアウトを延ばして再実行する"
+                "（例: env IP_KBLOGRD_TIMEOUT=900 python ip_judge.py learn ...）\n"
+                "  2) 期間を数日〜1週間程度に区切り、--window を複数回指定して合算する"
+                "（README 第13章「複数期間を合算」参照）\n"
+                "  3) しばらく待って（アーカイバ/共用サーバーの負荷が下がってから）再実行する"
+                % (TIMEOUT, pvs[0], ttime))
+        mid = len(pvs) // 2
+        d = {}
+        d.update(_fetch_chunk(pvs[:mid], ttime, log_group, kblogrd, dropped_out, _depth + 1))
+        d.update(_fetch_chunk(pvs[mid:], ttime, log_group, kblogrd, dropped_out, _depth + 1))
+        return d
+
     if _NOMATCH_MARK not in (err or ""):
         raise RuntimeError("kblogrd 失敗 (rc=%d): %s" % (rc, (err or "").strip()))
 

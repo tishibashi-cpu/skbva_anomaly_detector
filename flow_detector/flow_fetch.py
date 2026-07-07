@@ -41,7 +41,10 @@ DEFAULT_INTERVAL = 30       # サンプリング間隔[秒]。実アーカイブ
                             # データ量を抑えるため既定は30sに間引く（flow_judge のCV閾値は
                             # 実測5s生データで較正したが、白色雑音的なノイズは間引いても
                             # 分散の程度は大きく変わらない想定。実機で気になれば5に戻せる）
-TIMEOUT = 120
+TIMEOUT = int(os.environ.get("FLOW_KBLOGRD_TIMEOUT", 300))
+                            # kblogrd 1回あたりのタイムアウト[秒]。既定300s（旧120sではip_fetch.py
+                            # で実機のTimeoutExpiredが確認されたため延長。詳細は同ファイルの修正
+                            # コメント参照）。環境変数 FLOW_KBLOGRD_TIMEOUT でコード変更なしに上書き可
 
 _NOMATCH_MARK = "specified record name doesn't match"
 _PV_TOKEN_RE = re.compile(r"[A-Za-z][\w]*:[\w]+(?::[\w]+)*")
@@ -103,6 +106,8 @@ def parse_kaleida(text, pvs):
 
 
 def _kblogrd_once(pvs, ttime, log_group, kblogrd):
+    """タイムアウト時は rc=None を返す（raise しない。_fetch_chunk が二分探索で再試行できる
+    ようにするため。ip_fetch.py/temp_fetch.py と同じ方針）。"""
     cmd = [kblogrd, "-r", ",".join(pvs), "-t", ttime, "-f", "kaleida", log_group]
     try:
         res = subprocess.run(cmd, stdin=subprocess.DEVNULL,
@@ -113,17 +118,38 @@ def _kblogrd_once(pvs, ttime, log_group, kblogrd):
             "kblogrd が見つかりません: %s\n"
             "流量計の取得は kblogrd のある実機（kekb-co-user01/02/03）で実行してください。"
             "手元では `python flow_fetch.py selftest`（kblogrd 不要）で確認できます。" % kblogrd)
+    except subprocess.TimeoutExpired:
+        return None, "", ""
     return res.returncode, res.stdout, res.stderr
 
 
 def _fetch_chunk(pvs, ttime, log_group, kblogrd, dropped_out=None, _depth=0):
-    """1チャンクを頑健に取得する（temp_fetch/ip_fetch と同じ二分探索フォールバック方式）。"""
+    """1チャンクを頑健に取得する（temp_fetch/ip_fetch と同じ二分探索フォールバック方式。
+    タイムアウトも同じ二分探索で対処し、1本まで割ってもなお解消しない場合だけ
+    分かりやすいエラーに変換する）。"""
     pvs = list(pvs)
     if not pvs:
         return {}
     rc, out, err = _kblogrd_once(pvs, ttime, log_group, kblogrd)
     if rc == 0:
         return parse_kaleida(out, pvs)
+
+    if rc is None:                          # タイムアウト
+        if len(pvs) == 1:
+            raise RuntimeError(
+                "kblogrd が %d 秒以内に応答しませんでした（PV 1本: %s, 期間 %s）。\n"
+                "本数を1本まで減らしても解消しないため、期間そのものが重いと考えられます。"
+                "対処法:\n"
+                "  1) 環境変数 FLOW_KBLOGRD_TIMEOUT でタイムアウトを延ばして再実行する\n"
+                "  2) 期間を短く区切って複数回に分けて取得する\n"
+                "  3) しばらく待って（アーカイバ/共用サーバーの負荷が下がってから）再実行する"
+                % (TIMEOUT, pvs[0], ttime))
+        mid = len(pvs) // 2
+        d = {}
+        d.update(_fetch_chunk(pvs[:mid], ttime, log_group, kblogrd, dropped_out, _depth + 1))
+        d.update(_fetch_chunk(pvs[mid:], ttime, log_group, kblogrd, dropped_out, _depth + 1))
+        return d
+
     if _NOMATCH_MARK not in (err or ""):
         raise RuntimeError("kblogrd 失敗 (rc=%d): %s" % (rc, (err or "").strip()))
 
