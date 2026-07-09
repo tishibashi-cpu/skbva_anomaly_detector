@@ -19,6 +19,16 @@
 ので、ノイズ判定は絶対閾値だけでなく自己平常との比較も併用する。
 """
 
+import os
+
+# numpy(OpenBLAS)は既定で「使えるだけのコア数」を毎回の計算にフル動員しようとし、共用サーバーで
+# 無駄にCPUを奪い合う（detector_headless.py --watch で実機のCPU使用率1000%超として確認済み。
+# 詳細はdetector_headless.py冒頭のコメント参照）。このファイルは selftest 等で単独実行される
+# ことも多く、他のimportより前に対策を入れる。
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+          "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 import numpy as np
 
 CONFIG = {
