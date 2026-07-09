@@ -18,6 +18,8 @@ SuperKEKB 圧力異常検知 — 監視ダッシュボード（プロトタイ�
 import json
 import os
 import sys
+
+_DASH_DIR = os.path.dirname(os.path.abspath(__file__))
 import random
 import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +35,18 @@ except Exception:
     sysload = None
     _cpu_sampler = None
     _proc_sampler = None
+
+# detector_headless.py（別プロセス。親子関係が無いため ps の子プロセス探索では見つからない）の
+# CPU/メモリも表示する。singleton.py が書くロックファイルからPIDを教えてもらう方式
+# （実機でdetector_headless.py --watchがCPU使用率1000%超に達した際、dashboard.py自身の
+# 「本プログラムCPU」表示は無関係の値しか出ておらず気づけなかったための追加）。
+_DETECTOR_LOCK = os.path.join(_DASH_DIR, ".detector.lock")
+try:
+    import singleton
+    _detector_proc_sampler = sysload.ProcSampler(pid=os.getpid()) if sysload else None
+except Exception:
+    singleton = None
+    _detector_proc_sampler = None
 
 # 蓄積電流（リアルタイム）取得。EPICS が無くてもダッシュボードは動く。
 try:
@@ -56,7 +70,6 @@ LABEL_QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "label_qu
 # 新レイアウト: skbva_anomaly_detector/temp_detector/temp_dashboard_state.json（既定）。
 # 旧レイアウト（temp_detector が兄弟ディレクトリ skbva_temp_detector/ だった配置）にも
 # 後方互換でフォールバックする。環境変数が最優先。
-_DASH_DIR = os.path.dirname(os.path.abspath(__file__))
 _TEMP_STATE_CANDIDATES = [
     os.path.join(_DASH_DIR, "temp_detector", "temp_dashboard_state.json"),          # 新レイアウト
     os.path.join(os.path.dirname(_DASH_DIR), "skbva_temp_detector", "temp_dashboard_state.json"),  # 旧レイアウト
@@ -410,9 +423,9 @@ PAGE = r"""<!DOCTYPE html>
   .dot.on { background: var(--ok); }
   .meta { display: flex; align-items: center; gap: 14px; font-size: 12.5px; color: var(--muted); }
   .pill { padding: 3px 10px; border-radius: 6px; background: var(--surface2); color: var(--muted); }
-  #sysload.load-ok   { color: var(--ok); }
-  #sysload.load-warn { color: #e6a02a; }
-  #sysload.load-high { color: var(--danger-fg); background: var(--danger-bg); }
+  .pill.load-ok   { color: var(--ok); }
+  .pill.load-warn { color: #e6a02a; }
+  .pill.load-high { color: var(--danger-fg); background: var(--danger-bg); }
 
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
            gap: 10px; margin: 4px 0 22px; }
@@ -581,6 +594,7 @@ PAGE = r"""<!DOCTYPE html>
     <div class="meta">
       <span class="pill" id="sysload" title="共用サーバー全体の負荷">負荷 —</span>
       <span class="pill" id="selfload" title="このダッシュボード（＋子プロセス）自身の使用量">本プログラム —</span>
+      <span class="pill" id="detectorload" title="detector_headless.py（別プロセス）の使用量。&#10;本プログラムの数字とは別物なので注意（親子関係が無い独立プロセス）。">検知プログラム —</span>
       <span id="updated">— 更新待ち</span>
       <span class="pill" id="classifier">判定: —</span>
     </div>
@@ -1049,6 +1063,26 @@ async function refreshLoad() {
       se.textContent = "本プログラム CPU " + sc + " ⋅ Mem " + d.self_mem_mb + " MB";
       se.title = "このダッシュボード（＋子プロセス " + d.self_nproc + " 個）自身の使用量。" +
                  "CPU% はサーバー全体に対する割合なので、左の全体CPU%と直接比べられる。";
+    }
+    // detector_headless.py（別プロセス。親子関係が無いのでps探索では見えない。
+    // .detector.lock からPIDを教えてもらって計測）の使用量。
+    const de = document.getElementById("detectorload");
+    if (de) {
+      if (d.detector_alive) {
+        const dc = (d.detector_cpu_percent === null || d.detector_cpu_percent === undefined)
+                   ? "—" : (d.detector_cpu_percent + "%");
+        de.textContent = "検知プログラム CPU " + dc + " ⋅ Mem " + (d.detector_mem_mb ?? "—") + " MB";
+        de.title = "detector_headless.py（＋子プロセス " + (d.detector_nproc ?? "—") + " 個）の使用量。" +
+                   "CPU% はサーバー全体に対する割合。1プロセスでここが高い（目安: 20%以上）ときは" +
+                   "--watch の負荷が高すぎる可能性があるので、実機で top 等も確認するとよい。";
+        de.className = "pill" + (d.detector_cpu_percent >= 50 ? " load-high"
+                                 : d.detector_cpu_percent >= 20 ? " load-warn" : "");
+      } else {
+        de.textContent = "検知プログラム: 停止中/未検出";
+        de.title = "detector_headless.py --watch が動いていない、または .detector.lock が" +
+                   "見つからない（ダッシュボードとは別プロセスなので起動していないと出ません）。";
+        de.className = "pill";
+      }
     }
   } catch (e) {
     const el = document.getElementById("sysload");
@@ -1912,7 +1946,14 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json; charset=utf-8")
         elif self.path.startswith("/api/sysload"):
             if sysload is not None:
-                body = json.dumps(sysload.snapshot(_cpu_sampler, _proc_sampler), ensure_ascii=False)
+                extra = None
+                if singleton is not None:
+                    det_pid = singleton.read_alive_pid(_DETECTOR_LOCK, tag="detector_headless.py")
+                    if det_pid is not None:
+                        _detector_proc_sampler.set_pid(det_pid)
+                    extra = {"detector": (_detector_proc_sampler, det_pid is not None)}
+                body = json.dumps(sysload.snapshot(_cpu_sampler, _proc_sampler, extra_procs=extra),
+                                  ensure_ascii=False)
             else:
                 body = json.dumps({"level": "ok", "loadavg": None})
             self._send(200, body.encode("utf-8"), "application/json; charset=utf-8")

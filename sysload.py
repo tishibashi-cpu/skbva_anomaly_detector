@@ -130,6 +130,14 @@ class ProcSampler:
         self.pid = pid or os.getpid()
         self._prev = None   # (proc_ticks, total_ticks)
 
+    def set_pid(self, pid):
+        """監視対象PIDを差し替える（別プロセスの再起動でPIDが変わった場合等に使う）。
+        実際に変わっていれば基準値をリセットする（差し替え前後でtick数を混ぜて比較すると
+        意味の無いCPU%が出てしまうため）。"""
+        if pid != self.pid:
+            self.pid = pid
+            self._prev = None
+
     def _total_ticks(self):
         with open("/proc/stat", encoding="ascii") as f:
             return sum(int(x) for x in f.readline().split()[1:])
@@ -179,8 +187,13 @@ def _level(load_ratio, cpu_pct, mem_pct):
     return lvl
 
 
-def snapshot(sampler=None, proc_sampler=None):
-    """負荷状況の辞書を返す。dashboard の /api/sysload がこれを JSON で返す。"""
+def snapshot(sampler=None, proc_sampler=None, extra_procs=None):
+    """負荷状況の辞書を返す。dashboard の /api/sysload がこれを JSON で返す。
+
+    extra_procs: {key: (ProcSamplerまたはNone, alive_bool)} を渡すと、自プロセスとは別の
+    プロセス（親子関係が無く ps の子プロセス探索では見つからないもの。例:
+    detector_headless.py）のCPU/メモリも `<key>_cpu_percent` 等として出力に加える。
+    alive_bool=False なら（プロセスが見つからない/停止している）全て None を返す。"""
     la = loadavg()
     n = ncpu()
     cpu_pct = sampler.percent() if sampler is not None else None
@@ -206,6 +219,20 @@ def snapshot(sampler=None, proc_sampler=None):
         out["self_mem_percent"] = (round(100.0 * srss / mem_total, 1)
                                    if mem_total else None)
         out["self_nproc"] = nproc
+    # 他プロセス（例: detector_headless.py）の寄与
+    if extra_procs:
+        for key, (samp, alive) in extra_procs.items():
+            if alive and samp is not None:
+                ecpu, erss, enproc = samp.sample()
+                out["%s_alive" % key] = True
+                out["%s_cpu_percent" % key] = round(ecpu, 1) if ecpu is not None else None
+                out["%s_mem_mb" % key] = round(erss)
+                out["%s_nproc" % key] = enproc
+            else:
+                out["%s_alive" % key] = False
+                out["%s_cpu_percent" % key] = None
+                out["%s_mem_mb" % key] = None
+                out["%s_nproc" % key] = None
     return out
 
 

@@ -808,29 +808,31 @@ def judge(ring, start, end, interval_sec=temp_fetch.DEFAULT_INTERVAL, models_pat
             cache[key] = {"beam": beam, "nb": nb}
         return cache[key]
 
-    # 判定窓の温度をチャンク単位でまとめて取得（linear/hom問わず対象PV全体で共通）
-    now_temp = {}
+    # 判定窓の温度をまとめて取得（linear/hom問わず対象PV全体で共通）。
+    # fetch_history 自身が内部で CHUNK 単位に分けて kblogrd を呼ぶので、ここで事前に
+    # 手動チャンク分割してから呼ぶ必要はない（以前はそうしており、fetch_history() の
+    # 呼び出し回数が余計に増えて実機で無駄なオーバーヘッド・ログ出力の原因になっていた）。
     all_pv_names = [rec["pv"] for rec, saved, mt in targets]
-    for chunk in temp_fetch._chunks(all_pv_names, temp_fetch.CHUNK):
-        try:
-            now_temp.update(temp_fetch.fetch_history(ring, start, end, interval_sec=interval_sec, pvs=chunk))
-        except Exception as ex:
-            sys.stderr.write("[judge] 判定窓チャンク取得失敗（%d本スキップ）: %s\n" % (len(chunk), ex))
+    try:
+        now_temp = temp_fetch.fetch_history(ring, start, end, interval_sec=interval_sec, pvs=all_pv_names)
+    except Exception as ex:
+        sys.stderr.write("[judge] 判定窓の取得失敗（%d本スキップ）: %s\n" % (len(all_pv_names), ex))
+        now_temp = {}
 
-    # 基準窓の温度（hom型のみ再取得が要る）を、基準期間ごとにグルーピングしてチャンク単位取得
+    # 基準窓の温度（hom型のみ再取得が要る）を、基準期間ごとにグルーピングして取得
+    # （基準期間はPVごとに違いうるため、同じ期間のPVはまとめて1回で取得する）。
     ref_temp = {}
     by_ref_window = {}
     for rec, saved, mt in targets:
         if mt == "hom":
             by_ref_window.setdefault((saved["trained_start"], saved["trained_end"]), []).append(rec["pv"])
     for (rs, re_), pv_names in by_ref_window.items():
-        for chunk in temp_fetch._chunks(pv_names, temp_fetch.CHUNK):
-            try:
-                d = temp_fetch.fetch_history(ring, rs, re_, interval_sec=interval_sec, pvs=chunk)
-                for pv, v in d.items():
-                    ref_temp[(rs, re_, pv)] = v
-            except Exception as ex:
-                sys.stderr.write("[judge] 基準窓チャンク取得失敗（%d本スキップ）: %s\n" % (len(chunk), ex))
+        try:
+            d = temp_fetch.fetch_history(ring, rs, re_, interval_sec=interval_sec, pvs=pv_names)
+            for pv, v in d.items():
+                ref_temp[(rs, re_, pv)] = v
+        except Exception as ex:
+            sys.stderr.write("[judge] 基準窓の取得失敗（%d本スキップ）: %s\n" % (len(pv_names), ex))
 
     results = []
     for rec, saved, model_type in targets:
@@ -1551,6 +1553,54 @@ def _selftest():
         temp_fetch.fetch_beam = orig_beam
         if os.path.isfile(model_path9):
             os.remove(model_path9)
+
+    # 10)【回帰テスト】judge() も learn() と同じく、対象PVを手動で26本ずつに事前分割してから
+    # fetch_history を何度も呼ぶのではなく、fetch_history 自身の内部チャンク分割に任せて
+    # 1回（基準期間はグループごとに1回）だけ呼ぶこと（実機でCPU高負荷・ログ大量出力の一因に
+    # なっていた無駄な呼び出し回数増加の再発防止）。
+    n10 = 50
+    rng10 = np.random.RandomState(6)
+    hist_calls10 = []
+
+    def fake_list10(ring, **k):
+        return [{"pv": "VAHTMP:D%02d_%03d:X:BL" % (i % 12 + 1, i), "ring": "HER", "section": "D%02d" % (i % 12 + 1),
+                 "tag": "X", "suffix": "BL", "family": None} for i in range(temp_fetch.CHUNK * 2 + 5)]
+
+    def fake_hist10(ring, start, end, interval_sec=300, pvs=None, **k):
+        hist_calls10.append(len(pvs))
+        out = {}
+        for pv in pvs:
+            I = np.clip(900 + 250 * np.sin(np.linspace(0, 4 * np.pi, n10)) + rng10.normal(0, 15, n10), 0, 1500)
+            T = 20 + 0.004 * I + rng10.normal(0, 0.3, n10)
+            out[pv] = {"ring": ring, "section": "D01", "tag": "X", "suffix": "BL",
+                      "series": list(zip(range(n10), [float(x) for x in T]))}
+        return out
+
+    def fake_beam10(ring, start, end, interval_sec=300, **k):
+        I = np.clip(900 + 250 * np.sin(np.linspace(0, 4 * np.pi, n10)) + rng10.normal(0, 15, n10), 0, 1500)
+        return list(zip(range(n10), [float(x) for x in I]))
+
+    temp_fetch.load_pv_list = fake_list10
+    temp_fetch.fetch_history = fake_hist10
+    temp_fetch.fetch_beam = fake_beam10
+    try:
+        with _tf.NamedTemporaryFile(suffix=".json", delete=False) as tf10:
+            model_path10 = tf10.name
+        os.remove(model_path10)
+        learn("HER", "20220401000000", "20220501000000", out_path=model_path10, model="linear")
+        hist_calls10.clear()   # learn 分の呼び出しは対象外。judge 分だけを数える
+        judge("HER", "20260601000000", "20260602000000", models_path=model_path10)
+        n_targets10 = temp_fetch.CHUNK * 2 + 5
+        print("  judge()一括取得: %d本処理で fetch_history呼び出し=%d回（期待1回。以前は%d回近くに膨らんでいた）"
+              % (n_targets10, len(hist_calls10), -(-n_targets10 // temp_fetch.CHUNK)))
+        # linear型は基準期間を再取得しないので、判定窓分の1回だけになるはず
+        ok &= (len(hist_calls10) == 1 and hist_calls10[0] == n_targets10)
+    finally:
+        temp_fetch.load_pv_list = orig_list
+        temp_fetch.fetch_history = orig_hist
+        temp_fetch.fetch_beam = orig_beam
+        if os.path.isfile(model_path10):
+            os.remove(model_path10)
 
     print("=== selftest:", "PASS" if ok else "FAIL", "===")
     return ok

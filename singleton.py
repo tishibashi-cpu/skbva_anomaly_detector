@@ -60,6 +60,25 @@ def _holds_lock(pid, tag):
     return True
 
 
+def read_alive_pid(lockpath, tag=""):
+    """ロックファイルから PID を読み、生きていて（tag指定時はcmdlineに含まれることも確認して）
+    いれば pid を返す。ファイルが無い/読めない/プロセスが死んでいる/別プログラムの残骸ロックなら
+    None。
+
+    自分自身の多重起動防止（acquire/guard）とは別の用途：**他プロセスの生死とPIDを外から
+    問い合わせる**ためのもの。dashboard.py が別プロセスの detector_headless.py のCPU/メモリ
+    使用量を表示する際に使う（両者は親子関係の無い独立プロセスなので、psの子プロセス探索では
+    見つからず、ロックファイル越しにPIDを教えてもらう必要がある）。"""
+    if not os.path.isfile(lockpath):
+        return None
+    try:
+        with open(lockpath, encoding="ascii") as f:
+            pid = int(f.read().strip().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    return pid if _holds_lock(pid, tag) else None
+
+
 def acquire(lockpath, tag=""):
     """ロックを取得する。既に同名プロセスが保持していれば AlreadyRunning。"""
     if os.path.exists(lockpath):

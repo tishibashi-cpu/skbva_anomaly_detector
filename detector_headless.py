@@ -27,6 +27,26 @@ detector_headless.py — 末次さんの検知プログラムを GUI なしで�
 """
 
 import os
+
+# ── 0. BLAS/TensorFlow のスレッド数を1に固定 ─────────────────────────────
+# 【実機で確認された不具合】--watch 実行時、python3 プロセスの CPU使用率が1000%超
+# （10コア分以上）に達することがあった。原因は numpy(OpenBLAS)・TensorFlow のいずれも
+# 既定では「使えるだけのコア数」を毎回の計算にフル動員しようとすること
+# （このサーバーの OpenBLAS は MAX_THREADS=64）。本プログラムは CCG約600台・
+# 温度計1550+1260台・流量計678台…のように**多数のPVを逐次ループしながら小さな配列に
+# 対して統計計算する**ため、この既定挙動は逆効果でしかない：計算1回は軽いのに、
+# 呼び出しのたびにスレッドプールを総動員しようとしてスレッド生成/同期のオーバーヘッドが
+# 積み上がる。さらに --watch は CCG本体・IP・温度計・機器劣化・流量計のjudgeを別スレッドで
+# 並行実行する設計（第II部 7 章）なので、各スレッドがそれぞれ全コアを奪い合い**多重に競合**
+# する。各ライブラリがスレッド数を読むのは import 時（正確には初期化時）なので、
+# この設定は他の import より前に置く必要がある（numpy/TensorFlow は legacy/ の CCG本体
+# 経由で間接的に import されるため、うっかり後回しにしやすい）。
+# 既に環境変数で明示指定されていればそれを優先する（setdefault）。
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+          "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+          "TF_NUM_INTRAOP_THREADS", "TF_NUM_INTEROP_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 import sys
 import time
 import threading
