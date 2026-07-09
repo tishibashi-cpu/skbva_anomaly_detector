@@ -382,7 +382,7 @@ PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>圧力異常モニター — SuperKEKB</title>
+<title>SuperKEKB MR真空システム異常モニター</title>
 <style>
   :root {
     --bg: #14161b; --surface: #1c1f27; --surface2: #232732;
@@ -574,7 +574,7 @@ PAGE = r"""<!DOCTYPE html>
 
   <div class="topbar">
     <div class="brand">
-      <h1>圧力異常モニター</h1>
+      <h1>SuperKEKB MR真空システム異常モニター</h1>
       <span class="ring-stat" id="ler-stat"><span class="dot"></span> LER —</span>
       <span class="ring-stat" id="her-stat"><span class="dot"></span> HER —</span>
     </div>
@@ -1470,15 +1470,24 @@ function renderEquipmentAnomalies(s) {
     if (badge) { badge.textContent = ""; badge.classList.remove("hot"); }
     return;
   }
-  let totalSev3 = 0, totalAnom = 0, html = "", anyArchiverStopped = false;
+  let totalSev3 = 0, totalAnom = 0, html = "", anyArchiverStopped = false, allSkipped = true;
   ["LER", "HER", "IR"].forEach(ring => {
     const r = s.rings[ring];
     if (!r) return;
     if (r.skipped) {
+      // 機器劣化検知は温度計異常検知と同じアーカイバ(温度)を使うため、そちらが停止中なら
+      // ここでも参考情報として出す（learn前はこのタブ自身では判定を試みていないので、
+      // 「未学習」と「アーカイバ停止中」は別の理由だが、判断材料として関連付けて示す）。
+      const tRing = TEMP_STATE && TEMP_STATE.rings && TEMP_STATE.rings[ring];
+      const tempDown = tRing && tRing.archiver_stopped;
       html += '<div class="temp-ring-title">' + ring + '</div><div class="footnote">未学習のためスキップ' +
-              '（<code>python temp_equipment.py learn ' + ring + ' &lt;開始&gt; &lt;終了&gt;</code> で学習してください）</div>';
+              '（<code>python temp_equipment.py learn ' + ring + ' &lt;開始&gt; &lt;終了&gt;</code> で学習してください）' +
+              (tempDown ? '　※温度計異常検知タブでも現在アーカイバ停止中と出ています。learn後もこの期間は同様に'
+                        + '「アーカイバ停止中」表示になる見込みです' : '') +
+              '</div>';
       return;
     }
+    allSkipped = false;
     if (r.error) {
       html += '<div class="temp-ring-title">' + ring + '</div><div class="footnote">判定失敗: ' + r.error + '</div>';
       return;
@@ -1536,6 +1545,9 @@ function renderEquipmentAnomalies(s) {
   if (badge) {
     if (anyArchiverStopped) {
       badge.textContent = "停止中";
+      badge.classList.remove("hot");
+    } else if (allSkipped) {
+      badge.textContent = "未学習";
       badge.classList.remove("hot");
     } else {
       badge.textContent = totalAnom ? (totalSev3 + "/" + totalAnom) : "";
@@ -1987,7 +1999,7 @@ def main():
         return
     src = ("デモ（合成データ）" if os.environ.get("RECORD_RAW_DEMO")
            else ("dashboard_state.json" if os.path.isfile(STATE_FILE) else "内蔵ダミーデータ"))
-    print("圧力異常モニター（プロトタイプ）起動")
+    print("SuperKEKB MR真空システム異常モニター（プロトタイプ）起動")
     print("  データ源: %s" % src)
     print("  ローカル:  http://localhost:%d" % port)
     print("  停止: Ctrl-C")
