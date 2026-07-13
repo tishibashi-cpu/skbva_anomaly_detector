@@ -215,6 +215,83 @@ FLOW_DIR              = os.path.join(HERE, "flow_detector")
 _flow_judge_state = {"last_run": datetime.datetime(2000, 1, 1), "warned_missing": False}
 _flow_judge_lock = threading.Lock()
 
+# ── 自プロセスのCPU/メモリ使用量を定期的にログへ記録する（実機でメモリがサイクルを重ねる
+#   たびに少しずつ増えていく現象が観測されたため、実態を長期間追えるようにする診断機能）。
+#   legacy/ のCCG本体が毎サイクルKerasモデルを再読込しており、TensorFlowのメモリアロケータが
+#   clear_session()後もメモリをOSに返さない既知の特性があるため、増加が頭打ちになるか
+#   青天井かをこのログで判断できる（詳細はREADME第10章のトラブルシューティング表参照）。
+RESOURCE_LOG_FILE = os.path.join(HERE, "detector_resource_log.csv")
+RESOURCE_LOG_INTERVAL_SEC = int(os.environ.get("RESOURCE_LOG_INTERVAL_SEC", 600))  # 既定10分おき
+RESOURCE_LOG_MAX_BYTES = 5 * 1024 * 1024   # このサイズを超えたら古い方から間引く（既定5MB）
+RESOURCE_LOG_KEEP_LINES = 20000            # 間引き後に残す行数（既定10分間隔なら約139日分）
+_resource_log_state = {"last_run": datetime.datetime(2000, 1, 1)}
+_resource_log_lock = threading.Lock()
+_proc_start_time = time.time()
+try:
+    import sysload as _sysload
+    _self_sampler = _sysload.ProcSampler(pid=os.getpid())
+    _self_sampler.sample()   # 基準取り（1回目はcpu_percentがNoneになる）
+except Exception:
+    _sysload = None
+    _self_sampler = None
+
+
+def _trim_resource_log_if_large():
+    """RESOURCE_LOG_FILE が RESOURCE_LOG_MAX_BYTES を超えたら、直近 RESOURCE_LOG_KEEP_LINES 行
+    だけ残して間引く（無限に肥大化させないため。長期間の推移を見るという目的自体は、間引き後も
+    直近139日分程度残るので実用上問題ない）。サイズチェックは軽い（os.stat のみ）ので毎回呼んで
+    よく、実際にファイル全体を読み直すのはサイズ超過時だけ。"""
+    try:
+        if os.path.getsize(RESOURCE_LOG_FILE) <= RESOURCE_LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        with open(RESOURCE_LOG_FILE, encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) <= 1:
+            return
+        header, body = lines[0], lines[1:]
+        trimmed = [header] + body[-RESOURCE_LOG_KEEP_LINES:]
+        tmp = RESOURCE_LOG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(trimmed)
+        os.replace(tmp, RESOURCE_LOG_FILE)   # 原子的置換（読み取り中のツールが壊れた内容を見ない）
+        print("[resource_log] %d行 → 直近%d行に間引きました" % (len(body), len(trimmed) - 1), flush=True)
+    except Exception as ex:
+        print("[resource_log] 間引き失敗（続行）: %s" % ex, flush=True)
+
+
+def log_resource_usage(force=False):
+    """自プロセス（detector_headless.py）のCPU%・RSSメモリをCSVに1行追記する
+    （RESOURCE_LOG_INTERVAL_SEC おき。--watch/定期ループの内側から毎分呼ばれる想定で、
+    期限が来ていなければ即return＝軽い）。"""
+    if _self_sampler is None:
+        return
+    now = datetime.datetime.now()
+    due = (now - _resource_log_state["last_run"]).total_seconds() >= RESOURCE_LOG_INTERVAL_SEC
+    if not (force or due):
+        return
+    if not _resource_log_lock.acquire(blocking=False):
+        return   # 前回の書き込みがまだ終わっていない（通常起こらない）
+    try:
+        _resource_log_state["last_run"] = now
+        cpu, rss, nproc = _self_sampler.sample()
+        is_new = not os.path.isfile(RESOURCE_LOG_FILE)
+        with open(RESOURCE_LOG_FILE, "a", encoding="utf-8") as f:
+            if is_new:
+                f.write("timestamp,elapsed_sec,cpu_percent,rss_mb,nproc\n")
+            f.write("%s,%d,%s,%.1f,%d\n" % (
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+                int(time.time() - _proc_start_time),
+                ("%.1f" % cpu) if cpu is not None else "",
+                rss, nproc))
+        _trim_resource_log_if_large()
+    except Exception as ex:
+        print("[resource_log] 書き込み失敗（続行）: %s" % ex, flush=True)
+    finally:
+        _resource_log_lock.release()
+
 # ── 検知サイクル内の段階分散（CCG→IP→LER温度→HER温度）──
 #   4hごとの定期チェックで CCG(LER+HER)・IP・温度計(LER・HER)が同時に kblogrd/EPICS に
 #   アクセスすると負荷が集中するため、各段階の間に待機を挟んで分散する。
@@ -710,6 +787,7 @@ def watch_aborts(delay_min=3, debounce_min=30, interval_h=4):
     try:
         while True:
             time.sleep(60)
+            log_resource_usage()   # 期限（既定10分）が来ていなければ即return（軽い）
             # 定期セーフティネット: アボートが無くても interval_h ごとに走らせる
             now = datetime.datetime.now()
             for ring in ABORT_PV:
@@ -745,6 +823,7 @@ def loop_interval(interval_sec=4 * 3600):
           % (interval_sec, STAGE_STAGGER_SEC))
     while True:
         now = _check_now()
+        log_resource_usage()   # 期限（既定10分）が来ていなければ即return（軽い）
         for ring in ("LER", "HER"):
             _run_ring(ring, now)   # リングごとに JSON も更新
         if STAGE_STAGGER_SEC > 0:
@@ -831,6 +910,8 @@ if __name__ == "__main__":
         print("=== --once 完了（合計 %.0f 秒）dashboard_state.json を更新しました ==="
               % (time.time() - t_all), flush=True)
     elif "--watch" in sys.argv:
+        log_resource_usage(force=True)   # 起動直後の基準値（再起動のたびにログへ残る）
         watch_aborts()
     else:
+        log_resource_usage(force=True)   # 起動直後の基準値（再起動のたびにログへ残る）
         loop_interval()

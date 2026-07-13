@@ -48,6 +48,12 @@ import temp_pv
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS_FILE = os.path.join(HERE, "temp_equipment_models.json")
+# temp_headless.py（温度計異常検知）が書く状態ファイル。機器劣化検知は同じ温度アーカイバを
+# 使うため、そちらが直近でアーカイバ停止を確認済みなら、機器劣化検知は自前で同規模のフル
+# 取得を試みずその結果を借用する（下の _recent_temp_archiver_stopped 参照。実機で
+# 「アーカイバ停止中でも機器劣化検知が毎回2000本規模の無駄なkblogrd取得を試みてCPU/時間を
+# 浪費する」問題が確認されたため追加）。
+TEMP_DASH_STATE_FILE = os.path.join(HERE, "temp_dashboard_state.json")
 # detector_headless.py の定期実行（run_periodic_judge）が書くダッシュボード用状態ファイル。
 # temp_headless.py の temp_dashboard_state.json と対になる（dashboard.py の「機器劣化検知」タブが読む）。
 EQUIPMENT_STATE_FILE = os.path.join(HERE, "temp_equipment_state.json")
@@ -1035,6 +1041,40 @@ def cmd_judge(args):
                   "個別に現地確認を推奨。")
 
 
+def _recent_temp_archiver_stopped(ring, max_age_sec=2 * 3600):
+    """temp_headless.py が最近書いた temp_dashboard_state.json を見て、指定リングが直近で
+    アーカイバ停止と判定されていれば True、そうでなければ False、判断材料が無ければ None
+    （ファイルが無い/古すぎる/そのリングの記録が無い＝IRなど）を返す。
+
+    機器劣化検知は温度計異常検知と全く同じ温度アーカイバを使う。温度計異常検知が既に
+    「全PVで取得0本＝アーカイバ停止」と確認済みなら、機器劣化検知が独自にもう一度同規模
+    （数百〜1500本超）のフル取得を試みるのは、失敗すると分かっている無駄な kblogrd 呼び出し
+    でしかない。実機で、アーカイバ停止中でも機器劣化検知judgeが毎回この無駄な取得を試みて
+    CPU/時間を浪費していることが確認されたため、直近の温度計異常検知の結果を借用して
+    スキップできるようにした。
+
+    max_age_sec: この秒数より古い記録は「もう古くて参考にならない」として無視し、
+    機器劣化検知が自前で判定する（temp_headless.py 側が長時間止まっている場合の安全策。
+    detector_headless.py の段階分散リレーでは、通常は温度計異常検知の直後・数分以内に
+    機器劣化検知が走るので、正常運用では常にごく新しい記録を参照することになる）。
+    IRリングは温度計異常検知の対象に無いため、常に None（機器劣化検知が自前で判定する）。
+    """
+    if not os.path.isfile(TEMP_DASH_STATE_FILE):
+        return None
+    try:
+        with open(TEMP_DASH_STATE_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        gen = datetime.datetime.strptime(d["generated_at"], "%Y-%m-%d %H:%M:%S")
+        if (datetime.datetime.now() - gen).total_seconds() > max_age_sec:
+            return None
+        r = (d.get("rings") or {}).get(ring)
+        if not r:
+            return None
+        return bool(r.get("archiver_stopped"))
+    except Exception:
+        return None
+
+
 def run_periodic_judge(rings=("LER", "HER", "IR"), hours=24, interval_sec=temp_fetch.DEFAULT_INTERVAL,
                        models_path=MODELS_FILE, out_path=EQUIPMENT_STATE_FILE, top=60):
     """detector_headless.py の検知サイクルから定期的に呼ばれる版（CCG/IP/温度計センサと同じ
@@ -1060,6 +1100,20 @@ def run_periodic_judge(rings=("LER", "HER", "IR"), hours=24, interval_sec=temp_f
         if not rd or not any(m.get("trust") for m in rd.values()):
             rings_out[ring] = {"skipped": True, "reason": "not_learned"}
             continue
+
+        # 温度計異常検知が直近でこのリングのアーカイバ停止を確認済みなら、機器劣化検知は
+        # 同じ規模のフル取得を自前で試みず、その結果を借用してスキップする（無駄な
+        # kblogrd呼び出し・CPU消費の削減。詳細は _recent_temp_archiver_stopped 参照）。
+        if _recent_temp_archiver_stopped(ring):
+            rings_out[ring] = {
+                "window": {"start": start, "end": end, "hours": hours, "interval_sec": interval_sec},
+                "stats": {"n_judged": 0, "n_anomalies_sev3": 0},
+                "n_anomalies": 0, "anomalies": [], "section_warnings": [],
+                "archiver_stopped": True,
+                "archiver_stopped_borrowed": True,   # 自前取得はせず温度計側の結果を借用したことを明示
+            }
+            continue
+
         try:
             results = judge(ring, start, end, interval_sec=interval_sec, models_path=models_path,
                             attach_plot=True)
@@ -1609,6 +1663,66 @@ def _selftest():
         temp_fetch.fetch_beam = orig_beam
         if os.path.isfile(model_path10):
             os.remove(model_path10)
+
+    # 11)【回帰テスト】温度計異常検知が直近でアーカイバ停止を確認済みなら、機器劣化検知は
+    # 自前のフル取得を試みずスキップすること（実機で確認された無駄なCPU/kblogrd消費の対策）。
+    # 逆に、記録が古い/無い/停止していないときは自前でjudgeを試みること。
+    fetch_calls11 = {"n": 0}
+
+    def fake_fetch11(ring, start, end, interval_sec=300, pvs=None, **k):
+        fetch_calls11["n"] += 1
+        return {}
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf11:
+        model_path11 = tf11.name
+    os.remove(model_path11)
+    with open(model_path11, "w") as f:
+        json.dump({"LER": {"PV1": {"model": "linear", "a": 20, "b": 0.003, "r2": 0.9, "n": 100,
+                                   "i_range": [0, 1000], "trust": True}}}, f)
+    temp_state_path11 = os.path.join(HERE, "temp_dashboard_state.json")
+    _had_temp_state = os.path.isfile(temp_state_path11)
+    _temp_state_backup = open(temp_state_path11, encoding="utf-8").read() if _had_temp_state else None
+    temp_fetch.fetch_history = fake_fetch11
+    try:
+        now11 = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        old11 = (datetime.datetime.now() - datetime.timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+
+        with open(temp_state_path11, "w", encoding="utf-8") as f:
+            json.dump({"generated_at": now11, "rings": {"LER": {"archiver_stopped": True}}}, f)
+        out11 = run_periodic_judge(rings=("LER",), models_path=model_path11, out_path="/tmp/_eq_selftest11.json")
+        print("  [borrow] 温度計が直近で停止確認済み: fetch呼び出し=%d回(期待0) borrowed=%s"
+              % (fetch_calls11["n"], out11["rings"]["LER"].get("archiver_stopped_borrowed")))
+        ok &= (fetch_calls11["n"] == 0 and out11["rings"]["LER"].get("archiver_stopped") is True
+              and out11["rings"]["LER"].get("archiver_stopped_borrowed") is True)
+
+        fetch_calls11["n"] = 0
+        with open(temp_state_path11, "w", encoding="utf-8") as f:
+            json.dump({"generated_at": old11, "rings": {"LER": {"archiver_stopped": True}}}, f)
+        run_periodic_judge(rings=("LER",), models_path=model_path11, out_path="/tmp/_eq_selftest11.json")
+        print("  [borrow] 記録が古い(3h前): fetch呼び出し=%d回(期待>=1、自前judge)" % fetch_calls11["n"])
+        ok &= (fetch_calls11["n"] >= 1)
+
+        fetch_calls11["n"] = 0
+        with open(temp_state_path11, "w", encoding="utf-8") as f:
+            json.dump({"generated_at": now11, "rings": {"LER": {"archiver_stopped": False}}}, f)
+        run_periodic_judge(rings=("LER",), models_path=model_path11, out_path="/tmp/_eq_selftest11.json")
+        print("  [borrow] 温度計は正常稼働中: fetch呼び出し=%d回(期待>=1、自前judge)" % fetch_calls11["n"])
+        ok &= (fetch_calls11["n"] >= 1)
+
+        fetch_calls11["n"] = 0
+        os.remove(temp_state_path11)
+        run_periodic_judge(rings=("LER",), models_path=model_path11, out_path="/tmp/_eq_selftest11.json")
+        print("  [borrow] 記録ファイル無し: fetch呼び出し=%d回(期待>=1、自前judge)" % fetch_calls11["n"])
+        ok &= (fetch_calls11["n"] >= 1)
+    finally:
+        temp_fetch.fetch_history = orig_hist
+        os.remove(model_path11)
+        if os.path.isfile("/tmp/_eq_selftest11.json"):
+            os.remove("/tmp/_eq_selftest11.json")
+        if _had_temp_state:
+            with open(temp_state_path11, "w", encoding="utf-8") as f:
+                f.write(_temp_state_backup)
+        elif os.path.isfile(temp_state_path11):
+            os.remove(temp_state_path11)
 
     print("=== selftest:", "PASS" if ok else "FAIL", "===")
     return ok

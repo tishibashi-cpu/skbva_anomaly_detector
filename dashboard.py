@@ -1529,7 +1529,10 @@ function renderEquipmentAnomalies(s) {
     if (r.archiver_stopped) {
       anyArchiverStopped = true;
       html += '<div class="archiver-banner">⚠ ' + ring + ': 現在、アーカイバ(kblog)が温度計のデータ取得を'
-            + '停止中です。学習済みPVすべてで有効なデータが取得できませんでした'
+            + '停止中です。' + (r.archiver_stopped_borrowed
+              ? '（温度計異常検知タブの直近の判定結果より。機器劣化検知側では無駄な再取得をせず'
+                + 'スキップしました）'
+              : '学習済みPVすべてで有効なデータが取得できませんでした')
             + '（判定は行われていません。機器の異常ではありません）。</div>';
     }
     const anomalies = r.anomalies || [];
