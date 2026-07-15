@@ -1071,12 +1071,16 @@ async function refreshLoad() {
       if (d.detector_alive) {
         const dc = (d.detector_cpu_percent === null || d.detector_cpu_percent === undefined)
                    ? "—" : (d.detector_cpu_percent + "%");
-        de.textContent = "検知プログラム CPU " + dc + " ⋅ Mem " + (d.detector_mem_mb ?? "—") + " MB";
+        const dm = (d.detector_mem_percent === null || d.detector_mem_percent === undefined)
+                   ? "" : (" (" + d.detector_mem_percent + "%)");
+        de.textContent = "検知プログラム CPU " + dc + " ⋅ Mem " + (d.detector_mem_mb ?? "—") + " MB" + dm;
         de.title = "detector_headless.py（＋子プロセス " + (d.detector_nproc ?? "—") + " 個）の使用量。" +
-                   "CPU% はサーバー全体に対する割合。1プロセスでここが高い（目安: 20%以上）ときは" +
-                   "--watch の負荷が高すぎる可能性があるので、実機で top 等も確認するとよい。";
-        de.className = "pill" + (d.detector_cpu_percent >= 50 ? " load-high"
-                                 : d.detector_cpu_percent >= 20 ? " load-warn" : "");
+                   "%はいずれもサーバー全体に対する割合。1プロセスでCPUが高い（目安: 20%以上）とき" +
+                   "や、Memが高い（目安: 15%以上）ときは実機で top / free -h 等も確認するとよい。";
+        const cpuLvl = d.detector_cpu_percent >= 50 ? 2 : d.detector_cpu_percent >= 20 ? 1 : 0;
+        const memLvl = d.detector_mem_percent >= 30 ? 2 : d.detector_mem_percent >= 15 ? 1 : 0;
+        const lvl = Math.max(cpuLvl, memLvl);
+        de.className = "pill" + (lvl === 2 ? " load-high" : lvl === 1 ? " load-warn" : "");
       } else {
         de.textContent = "検知プログラム: 停止中/未検出";
         de.title = "detector_headless.py --watch が動いていない、または .detector.lock が" +

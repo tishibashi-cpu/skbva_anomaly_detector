@@ -221,17 +221,21 @@ def snapshot(sampler=None, proc_sampler=None, extra_procs=None):
         out["self_nproc"] = nproc
     # 他プロセス（例: detector_headless.py）の寄与
     if extra_procs:
+        mem_total = mem[0] if mem else None
         for key, (samp, alive) in extra_procs.items():
             if alive and samp is not None:
                 ecpu, erss, enproc = samp.sample()
                 out["%s_alive" % key] = True
                 out["%s_cpu_percent" % key] = round(ecpu, 1) if ecpu is not None else None
                 out["%s_mem_mb" % key] = round(erss)
+                out["%s_mem_percent" % key] = (round(100.0 * erss / mem_total, 1)
+                                               if mem_total else None)
                 out["%s_nproc" % key] = enproc
             else:
                 out["%s_alive" % key] = False
                 out["%s_cpu_percent" % key] = None
                 out["%s_mem_mb" % key] = None
+                out["%s_mem_percent" % key] = None
                 out["%s_nproc" % key] = None
     return out
 

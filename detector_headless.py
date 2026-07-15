@@ -262,10 +262,46 @@ def _trim_resource_log_if_large():
         print("[resource_log] 間引き失敗（続行）: %s" % ex, flush=True)
 
 
+RESOURCE_LOG_HEADER = "timestamp,elapsed_sec,cpu_percent,rss_mb,mem_percent,nproc\n"
+_resource_log_migrated = {"done": False}
+
+
+def _migrate_resource_log_header_if_needed():
+    """旧形式（mem_percent列が無い5列版）のログファイルを、新形式（6列）に1回だけ移行する。
+    既存行はmem_percentを空欄で埋めて列数を揃える（当時のシステム全体メモリ量が分からず
+    復元はできないが、以後の行からは記録される）。プロセス起動ごとに1回だけ試みる。"""
+    if _resource_log_migrated["done"]:
+        return
+    _resource_log_migrated["done"] = True
+    if not os.path.isfile(RESOURCE_LOG_FILE):
+        return
+    try:
+        with open(RESOURCE_LOG_FILE, encoding="utf-8") as f:
+            lines = f.readlines()
+        if not lines or lines[0] == RESOURCE_LOG_HEADER:
+            return   # 空 or 既に新形式
+        migrated = [RESOURCE_LOG_HEADER]
+        for line in lines[1:]:
+            parts = line.rstrip("\n").split(",")
+            if len(parts) == 5:   # 旧形式: timestamp,elapsed_sec,cpu_percent,rss_mb,nproc
+                ts, el, cpu, rss, nproc = parts
+                migrated.append("%s,%s,%s,%s,,%s\n" % (ts, el, cpu, rss, nproc))
+            else:
+                migrated.append(line)   # 想定外の形はそのまま残す（読み手側で無視される）
+        tmp = RESOURCE_LOG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(migrated)
+        os.replace(tmp, RESOURCE_LOG_FILE)
+        print("[resource_log] 旧形式ログ(5列)をmem_percent列付きの新形式(6列)に移行しました", flush=True)
+    except Exception as ex:
+        print("[resource_log] 旧形式ログの移行に失敗（続行、新形式で追記します）: %s" % ex, flush=True)
+
+
 def log_resource_usage(force=False):
-    """自プロセス（detector_headless.py）のCPU%・RSSメモリをCSVに1行追記する
-    （RESOURCE_LOG_INTERVAL_SEC おき。--watch/定期ループの内側から毎分呼ばれる想定で、
-    期限が来ていなければ即return＝軽い）。"""
+    """自プロセス（detector_headless.py）のCPU%・RSSメモリ・システム全体に対するメモリ占有率を
+    CSVに1行追記する（RESOURCE_LOG_INTERVAL_SEC おき。--watch/定期ループの内側から毎分呼ばれる
+    想定で、期限が来ていなければ即return＝軽い）。mem_percent は「他ユーザーに迷惑をかけていないか」
+    の目安として、絶対MB数よりサーバー間で比較しやすいように追加した。"""
     if _self_sampler is None:
         return
     now = datetime.datetime.now()
@@ -275,17 +311,28 @@ def log_resource_usage(force=False):
     if not _resource_log_lock.acquire(blocking=False):
         return   # 前回の書き込みがまだ終わっていない（通常起こらない）
     try:
+        _migrate_resource_log_header_if_needed()
         _resource_log_state["last_run"] = now
         cpu, rss, nproc = _self_sampler.sample()
+        mem_pct = None
+        if _sysload is not None:
+            try:
+                mem = _sysload.meminfo()
+                if mem:
+                    mem_pct = 100.0 * rss / mem[0]
+            except Exception:
+                mem_pct = None
         is_new = not os.path.isfile(RESOURCE_LOG_FILE)
         with open(RESOURCE_LOG_FILE, "a", encoding="utf-8") as f:
             if is_new:
-                f.write("timestamp,elapsed_sec,cpu_percent,rss_mb,nproc\n")
-            f.write("%s,%d,%s,%.1f,%d\n" % (
+                f.write(RESOURCE_LOG_HEADER)
+            f.write("%s,%d,%s,%.1f,%s,%d\n" % (
                 now.strftime("%Y-%m-%d %H:%M:%S"),
                 int(time.time() - _proc_start_time),
                 ("%.1f" % cpu) if cpu is not None else "",
-                rss, nproc))
+                rss,
+                ("%.1f" % mem_pct) if mem_pct is not None else "",
+                nproc))
         _trim_resource_log_if_large()
     except Exception as ex:
         print("[resource_log] 書き込み失敗（続行）: %s" % ex, flush=True)
